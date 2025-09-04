@@ -89,5 +89,8 @@ pip install -r requirements.txt
 
 ---
 
-###
+## Execution
 
+   ```bash
+   python3 main.py
+   ```
