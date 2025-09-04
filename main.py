@@ -2,22 +2,23 @@
 from __future__ import annotations
 
 import asyncio
+import os
+import sys
 from dataclasses import dataclass
 from typing import List, Tuple
 
 from openai import OpenAI  # pip install --upgrade openai
+
+# custom
 from api_key_crypto import get_api_key
 
 # ================== Configuration ==================
 LOG_NUMBER_OF_BATCHES = 2          # total completions = 2**LOG_NUMBER_OF_BATCHES
 MODEL = "gpt-5"                    # GPT-5 reasoning model
 REASONING_EFFORT = "high"          # minimal | low | medium | high
-VERBOSITY = "high"                  # low | medium | high (steers visible length)
+VERBOSITY = "high"                 # low | medium | high (steers visible length)
 MAX_CONCURRENCY = 8                # throttle to respect RPM/TPM
-
-PROMPT = (
-    "Write a hello world program in python"
-)
+PROMPT_FILE = "PUT_PROMPT_HERE.txt"
 # ====================================================
 
 @dataclass
@@ -31,12 +32,10 @@ def _make_client(api_key: str) -> OpenAI:
     return OpenAI(api_key=api_key)
 
 def _extract_text(resp) -> str:
-    # Prefer SDK helper if present
     txt = getattr(resp, "output_text", None)
     if isinstance(txt, str) and txt.strip():
         return txt
 
-    # Fallback: concatenate message text blocks
     parts: List[str] = []
     for item in getattr(resp, "output", []) or []:
         if getattr(item, "type", None) == "message":
@@ -54,14 +53,11 @@ def _extract_usage(resp) -> Tuple[int, int, int]:
     return int(rt), int(ot), int(tt)
 
 def _one_call(client: OpenAI, prompt: str):
-    # No token cap (no max_output_tokens)
-    # Force a text message; keep explicit reasoning controls.
     return client.responses.create(
         model=MODEL,
         input=prompt,
         reasoning={"effort": REASONING_EFFORT},
         text={"verbosity": VERBOSITY, "format": {"type": "text"}},
-        # No temperature/top_p for reasoning models.
     )
 
 def _complete_once(client: OpenAI, prompt: str) -> CompletionResult:
@@ -80,7 +76,24 @@ async def _run_parallel(client: OpenAI, prompt: str, n: int) -> List[CompletionR
     tasks = [asyncio.create_task(_one()) for _ in range(n)]
     return await asyncio.gather(*tasks)
 
+def _load_prompt() -> str:
+    if not os.path.exists(PROMPT_FILE):
+        with open(PROMPT_FILE, "w", encoding="utf-8") as f:
+            f.write("")
+        print(f"Prompt file '{PROMPT_FILE}' created. Please add your prompt and rerun.")
+        sys.exit(1)
+
+    with open(PROMPT_FILE, "r", encoding="utf-8") as f:
+        prompt = f.read().strip()
+
+    if not prompt:
+        print(f"Prompt file '{PROMPT_FILE}' is empty. Please add your prompt and rerun.")
+        sys.exit(1)
+
+    return prompt
+
 def main() -> None:
+    prompt = _load_prompt()
     api_key = get_api_key()
     print("API key successfully loaded.")
 
@@ -88,7 +101,7 @@ def main() -> None:
     n = 1 << LOG_NUMBER_OF_BATCHES
     print(f"MODEL={MODEL} | completions={n} | reasoning={REASONING_EFFORT} | verbosity={VERBOSITY}")
 
-    results = asyncio.run(_run_parallel(client, PROMPT, n))
+    results = asyncio.run(_run_parallel(client, prompt, n))
 
     for i, r in enumerate(results, 1):
         print(f"\n===== COMPLETION {i} of {n} =====")

@@ -208,3 +208,6 @@ __marimo__/
 
 # OpenAI API key file
 OPENAI.API_KEY
+
+# Promt files
+PUT_PROMPT_HERE.txt
