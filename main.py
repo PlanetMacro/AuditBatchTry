@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import asyncio
+import os
 
 from api_key_crypto import get_api_key
 import openai_client as oc
@@ -13,10 +14,22 @@ REASONING_EFFORT = "high"          # minimal | low | medium | high
 VERBOSITY = "high"                 # low | medium | high (steers visible length)
 MAX_CONCURRENCY = 8                # throttle to respect RPM/TPM
 PROMPT_FILE = "PUT_PROMPT_HERE.txt"
+OUTPUT_FILE = "AUDIT_RESULT.txt"
 # ====================================================
 
 
+def confirm_overwrite(path: str) -> bool:
+    if not os.path.exists(path):
+        return True
+    reply = input(f"{path} already exists. Overwrite? [Y/n]: ").strip().lower()
+    return reply in ("", "y", "yes")
+
+
 def main() -> None:
+    if not confirm_overwrite(OUTPUT_FILE):
+        print("Aborted. Existing file not overwritten.")
+        return
+
     prompt = oc.load_prompt(PROMPT_FILE)
     api_key = get_api_key()
     print("API key successfully loaded.")
@@ -55,9 +68,11 @@ def main() -> None:
         )
     )
 
-    # Final output: only the merged union
-    print("\n===== MERGED UNION (deduplicated) =====")
-    print(merged.text.strip() or "[empty]")
+    # Final output: write merged union to file
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write(merged.text.strip() or "[empty]\n")
+
+    print(f"\nMerged result written to {OUTPUT_FILE}")
 
     # Usage accounting: generation + merging
     print(
