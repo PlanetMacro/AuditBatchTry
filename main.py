@@ -25,6 +25,7 @@ def main() -> None:
     n = 1 << LOG_NUMBER_OF_BATCHES
     print(f"MODEL={MODEL} | completions={n} | reasoning={REASONING_EFFORT} | verbosity={VERBOSITY}")
 
+    # Step 1: generate N independent completions in parallel
     results = asyncio.run(
         oc.run_parallel(
             client=client,
@@ -37,10 +38,34 @@ def main() -> None:
         )
     )
 
-    for i, r in enumerate(results, 1):
-        print(f"\n===== COMPLETION {i} of {n} =====")
-        print(r.text.strip() or "[empty]")
-        print(f"[usage] reasoning_tokens={r.reasoning_tokens}  output_tokens={r.output_tokens}  total_tokens={r.total_tokens}")
+    # Aggregate usage for the generation phase
+    gen_reasoning = sum(r.reasoning_tokens for r in results)
+    gen_output = sum(r.output_tokens for r in results)
+    gen_total = sum(r.total_tokens for r in results)
+
+    # Step 2: hierarchical pairwise merge (union without duplicates) via the LLM
+    merged = asyncio.run(
+        oc.hierarchical_merge(
+            client=client,
+            texts=[r.text for r in results],
+            max_concurrency=MAX_CONCURRENCY,
+            model=MODEL,
+            reasoning_effort=REASONING_EFFORT,
+            verbosity=VERBOSITY,
+        )
+    )
+
+    # Final output: only the merged union
+    print("\n===== MERGED UNION (deduplicated) =====")
+    print(merged.text.strip() or "[empty]")
+
+    # Usage accounting: generation + merging
+    print(
+        "\n[usage]"
+        f" generation: reasoning_tokens={gen_reasoning}  output_tokens={gen_output}  total_tokens={gen_total}"
+        f" | merging: reasoning_tokens={merged.reasoning_tokens}  output_tokens={merged.output_tokens}  total_tokens={merged.total_tokens}"
+        f" | grand_total={gen_total + merged.total_tokens}"
+    )
 
 
 if __name__ == "__main__":
