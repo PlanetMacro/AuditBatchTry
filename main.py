@@ -8,7 +8,7 @@ from api_key_crypto import get_api_key
 import openai_client as oc
 
 # ================== Configuration ==================
-LOG_NUMBER_OF_BATCHES = 2          # total completions = 2**LOG_NUMBER_OF_BATCHES
+LOG_NUMBER_OF_BATCHES = 3          # total completions = 2**LOG_NUMBER_OF_BATCHES
 MODEL = "gpt-5"                    # GPT-5 reasoning model
 REASONING_EFFORT = "high"          # minimal | low | medium | high
 VERBOSITY = "high"                 # low | medium | high (steers visible length)
@@ -34,14 +34,20 @@ def main() -> None:
     api_key = get_api_key()
     print("API key successfully loaded.")
 
-    client = oc.make_client(api_key)
     n = 1 << LOG_NUMBER_OF_BATCHES
     print(f"MODEL={MODEL} | completions={n} | reasoning={REASONING_EFFORT} | verbosity={VERBOSITY}")
 
-    # Step 1: generate N independent completions in parallel
-    print(f"Generate {n} initial audit reports. This might take a while...")
-    results = asyncio.run(
-        oc.run_parallel(
+    async def _async_main():
+        # Create one async client and reuse it for all calls
+        client = oc.make_async_client(
+            api_key,
+            timeout_s=3600.0,     # SDK-level total timeout per request
+            max_retries=4,       # SDK-level retries
+            use_aiohttp=True,   # set True if you installed: pip install "openai[aiohttp]"
+        )
+
+        print(f"Generate {n} initial audit reports. This might take a while...")
+        results = await oc.run_parallel(
             client=client,
             prompt=prompt,
             n=n,
@@ -49,40 +55,43 @@ def main() -> None:
             model=MODEL,
             reasoning_effort=REASONING_EFFORT,
             verbosity=VERBOSITY,
+            per_request_timeout=600.0,  # optional per-request override
+            app_retries=2,              # app-level retries on 429/timeouts
         )
-    )
-    
-    print(f"Merge initial reports into one. This might take a while...")
-    # Aggregate usage for the generation phase
-    gen_reasoning = sum(r.reasoning_tokens for r in results)
-    gen_output = sum(r.output_tokens for r in results)
-    gen_total = sum(r.total_tokens for r in results)
 
-    # Step 2: hierarchical pairwise merge (union without duplicates) via the LLM
-    merged = asyncio.run(
-        oc.hierarchical_merge(
+        print("Merge initial reports into one. This might take a while...")
+        # Aggregate usage for the generation phase
+        gen_reasoning = sum(r.reasoning_tokens for r in results)
+        gen_output = sum(r.output_tokens for r in results)
+        gen_total = sum(r.total_tokens for r in results)
+
+        # Hierarchical merge via the async API
+        merged = await oc.hierarchical_merge(
             client=client,
             texts=[r.text for r in results],
             max_concurrency=MAX_CONCURRENCY,
             model=MODEL,
             reasoning_effort=REASONING_EFFORT,
             verbosity=VERBOSITY,
+            per_request_timeout=600.0,
         )
-    )
 
-    # Final output: write merged union to file
-    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-        f.write(merged.text.strip() or "[empty]\n")
+        # Final output
+        with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+            f.write(merged.text.strip() or "[empty]\n")
 
-    print(f"\nMerged result written to {OUTPUT_FILE}")
+        print(f"\nMerged result written to {OUTPUT_FILE}")
 
-    # Usage accounting: generation + merging
-    print(
-        "\n[usage]"
-        f" generation: reasoning_tokens={gen_reasoning}  output_tokens={gen_output}  total_tokens={gen_total}"
-        f" | merging: reasoning_tokens={merged.reasoning_tokens}  output_tokens={merged.output_tokens}  total_tokens={merged.total_tokens}"
-        f" | grand_total={gen_total + merged.total_tokens}"
-    )
+        # Usage accounting: generation + merging
+        print(
+            "\n[usage]"
+            f" generation: reasoning_tokens={gen_reasoning}  output_tokens={gen_output}  total_tokens={gen_total}"
+            f" | merging: reasoning_tokens={merged.reasoning_tokens}  output_tokens={merged.output_tokens}  total_tokens={merged.total_tokens}"
+            f" | grand_total={gen_total + merged.total_tokens}"
+        )
+
+    asyncio.run(_async_main())
+
 
 
 if __name__ == "__main__":
