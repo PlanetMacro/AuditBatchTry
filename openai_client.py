@@ -88,6 +88,11 @@ def _one_call(
         input=prompt,
         reasoning={"effort": reasoning_effort},
         text={"verbosity": verbosity, "format": {"type": "text"}},
+        tools=[
+            {"type": "web_search"},
+            {"type": "code_interpreter", "container": {"type": "auto"}},
+        ],
+        
     )
 
 

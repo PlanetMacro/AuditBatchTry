@@ -39,6 +39,7 @@ def main() -> None:
     print(f"MODEL={MODEL} | completions={n} | reasoning={REASONING_EFFORT} | verbosity={VERBOSITY}")
 
     # Step 1: generate N independent completions in parallel
+    print(f"Generate {n} initial audit reports. This might take a while...")
     results = asyncio.run(
         oc.run_parallel(
             client=client,
@@ -50,7 +51,8 @@ def main() -> None:
             verbosity=VERBOSITY,
         )
     )
-
+    
+    print(f"Merge initial reports into one. This might take a while...")
     # Aggregate usage for the generation phase
     gen_reasoning = sum(r.reasoning_tokens for r in results)
     gen_output = sum(r.output_tokens for r in results)
