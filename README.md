@@ -6,7 +6,7 @@
 
 - **Python:** 3.9+ (3.10 or newer recommended)
 - **Git:** to clone and manage the repository
-- **OpenAI account & API key (optional for now):** if you plan to call the OpenAI API, set `OPENAI_API_KEY` in your environment.
+- **OpenAI account & API key** (system will ask for the API key) 
 
 ---
 
@@ -94,3 +94,13 @@ pip install -r requirements.txt
    ```bash
    python3 main.py
    ```
+
+---
+
+## Use
+
+- Change parameters like LOG_NUMBER_OF_BATCHES in main.py
+- Put the audit code into PUT_PROMPT_HERE.txt
+- Read the result from AUDIT_RESULT.txt
+
+
