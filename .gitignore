@@ -211,3 +211,6 @@ OPENAI.API_KEY
 
 # Promt files
 PUT_PROMPT_HERE.txt
+
+# Promt files
+AUDIT_RESULT.txt
