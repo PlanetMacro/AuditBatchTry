@@ -1,0 +1,3 @@
+Issue: 1
+Location: println("Hello, world!");
+Description: The code calls println as a function instead of invoking the println! macro, causing a compile-time error (e.g., E0425: cannot find function `println` in this scope). Replace with println!("Hello, world!");.

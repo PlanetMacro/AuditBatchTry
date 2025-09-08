@@ -1,0 +1,11 @@
+Issue: 1
+Location: println('Hello, world!');
+Description: Rust’s println is a macro and must be invoked as println!, and string literals require double quotes; single quotes create an invalid multi-character char literal and calling println without '!' refers to a non-existent function; correct line: println!("Hello, world!");
+
+Issue: 2
+Location: println!(“Hello, world!”);
+Description: The line uses smart quotes (“ ”) instead of ASCII double quotes (" "), causing the println! macro invocation to fail to parse and the program to not compile. Replace the smart quotes with straight quotes.
+
+Issue: 3
+Location: println!("Hello, world!);
+Description: The string literal is missing a closing double quote, producing an unterminated string literal compilation error. Correct the line to println!("Hello, world!");

@@ -4,6 +4,7 @@ from __future__ import annotations
 import asyncio
 import os
 import random
+import re
 import string
 import sys
 from dataclasses import dataclass
@@ -39,6 +40,9 @@ MERGE_SYSTEM_PROMPT = (
 # ====================================================
 # Utilities & data structures
 # ====================================================
+
+RUNS_DIR = "RUNS"
+AUDIT_BASENAME_RE = re.compile(r"^audit_(\d+)$")  # files with no extension
 
 def _random_string(min_len: int = 5, max_len: int = 50) -> str:
     """Generate a random alphanumeric string with length in [min_len, max_len]."""
@@ -126,6 +130,87 @@ def make_async_client(
 
 
 # ====================================================
+# Filesystem helpers (RUNS/)
+# ====================================================
+
+def _ensure_runs_dir(path: str = RUNS_DIR) -> None:
+    """Create RUNS directory if missing."""
+    os.makedirs(path, exist_ok=True)
+
+def _list_audit_files(path: str = RUNS_DIR) -> List[Tuple[int, str]]:
+    """
+    Return list of (index, fullpath) for files named audit_{i} with i >= 1, sorted by i.
+    Ignores files that do not match the naming convention.
+    """
+    if not os.path.isdir(path):
+        return []
+    out: List[Tuple[int, str]] = []
+    for name in os.listdir(path):
+        m = AUDIT_BASENAME_RE.match(name)
+        if m:
+            i = int(m.group(1))
+            out.append((i, os.path.join(path, name)))
+    out.sort(key=lambda t: t[0])
+    return out
+
+def _next_run_index_and_remaining(n_desired: int, path: str = RUNS_DIR) -> Tuple[int, int, int]:
+    """
+    Given desired total runs (n_desired), returns:
+      (next_index, already_existing, to_run_now)
+    next_index is 1 if empty, else max existing index + 1.
+    """
+    files = _list_audit_files(path)
+    already_existing = len(files)
+    next_index = files[-1][0] + 1 if files else 1
+    to_run_now = max(0, n_desired - already_existing)
+    return next_index, already_existing, to_run_now
+
+def _write_audit_file(run_index: int, text: str, path: str = RUNS_DIR) -> str:
+    """
+    Write the raw audit text to RUNS/audit_{run_index} (no extension). Returns the file path.
+    Uses an atomic-style write: write to temp then rename.
+    """
+    _ensure_runs_dir(path)
+    target = os.path.join(path, f"audit_{run_index}")
+    tmp = target + ".tmp"
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(text or "")
+        f.flush()
+        os.fsync(f.fileno())
+    os.replace(tmp, target)
+    return target
+
+def _read_all_audit_texts(path: str = RUNS_DIR) -> List[str]:
+    """Read all RUNS/audit_{i} files (sorted by i) and return their contents as a list of strings."""
+    files = _list_audit_files(path)
+    texts: List[str] = []
+    for _, fp in files:
+        with open(fp, "r", encoding="utf-8") as f:
+            texts.append(f.read())
+    return texts
+
+def _is_power_of_two(n: int) -> bool:
+    return n > 0 and (n & (n - 1)) == 0
+
+def _pad_to_power_of_two(texts: List[str]) -> List[str]:
+    """
+    Ensure len(texts) is a power of two by duplicating the last element.
+    This preserves 'merge everything from RUNS' without dropping any run.
+    """
+    n = len(texts)
+    if n == 0:
+        return texts
+    if _is_power_of_two(n):
+        return texts
+    # next power-of-two >= n
+    k = 1
+    while k < n:
+        k <<= 1
+    last = texts[-1]
+    return texts + [last] * (k - n)
+
+
+# ====================================================
 # Response extraction
 # ====================================================
 
@@ -178,7 +263,8 @@ def _one_call(
         reasoning={"effort": reasoning_effort},
         text={"verbosity": verbosity, "format": {"type": "text"}},
         input=prompt,
-        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}],
+        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}], # run program + search
+        tools=[{"type": "web_search"}], # search
     )
 
 
@@ -226,7 +312,8 @@ async def _one_call_async(
         reasoning={"effort": reasoning_effort},
         text={"verbosity": verbosity, "format": {"type": "text"}},
         input=prompt,
-        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}],
+        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}], # run program + search
+        tools=[{"type": "web_search"}], # search
     )
 
 
@@ -261,6 +348,7 @@ async def _complete_once_async(
 
 # ====================================================
 # Parallel generation with bounded concurrency + backoff
+# (now with RUNS/ persistence and run-count adjustment)
 # ====================================================
 
 async def run_parallel(
@@ -275,19 +363,34 @@ async def run_parallel(
     per_request_timeout: Optional[float] = None,
     app_retries: int = 2,
     base_backoff_s: float = 1.0,
+    runs_dir: str = RUNS_DIR,
 ) -> List[CompletionResult]:
     """
-    Execute n completions concurrently, bounded by max_concurrency.
-    Adds application-level retries for 429s and timeouts with jittered exponential backoff.
+    Execute up to n total completions, but subtract any existing RUNS/audit_* files first.
+    Each newly produced completion is written to RUNS/audit_{i}.
+
+    Returns a list of CompletionResult for the completions performed in THIS call
+    (length can be less than n if RUNS/ already contains audits).
     """
-    sem = asyncio.Semaphore(max(1, min(max_concurrency, n)))
+    _ensure_runs_dir(runs_dir)
+    start_index, already_existing, to_run_now = _next_run_index_and_remaining(n, runs_dir)
+
+    if to_run_now <= 0:
+        # Nothing new to produce; all requested runs already exist on disk.
+        return []
+
+    sem = asyncio.Semaphore(max(1, min(max_concurrency, to_run_now)))
 
     async def _worker(k: int) -> CompletionResult:
+        """
+        k is 0-based index among the new runs that will be executed in THIS invocation.
+        """
         attempt = 0
+        run_index = start_index + k  # 1-based absolute run id across invocations
         while True:
             try:
                 async with sem:
-                    return await _complete_once_async(
+                    res = await _complete_once_async(
                         client,
                         prompt,
                         model=model,
@@ -295,6 +398,9 @@ async def run_parallel(
                         verbosity=verbosity,
                         per_request_timeout=per_request_timeout,
                     )
+                    # Persist ONLY the raw audit text (no metadata) as requested.
+                    _write_audit_file(run_index, res.text, runs_dir)
+                    return res
             except (
                 openai.RateLimitError,
                 openai.APITimeoutError,
@@ -310,7 +416,7 @@ async def run_parallel(
                 await asyncio.sleep(delay)
                 attempt += 1
 
-    tasks = [asyncio.create_task(_worker(i)) for i in range(n)]
+    tasks = [asyncio.create_task(_worker(i)) for i in range(to_run_now)]
     return await asyncio.gather(*tasks)
 
 
@@ -422,4 +528,51 @@ async def hierarchical_merge(
         current = merged_texts + carried_forward
 
     return CompletionResult(text=current[0], reasoning_tokens=agg_rt, output_tokens=agg_ot, total_tokens=agg_tt)
+
+
+# ====================================================
+# New: Merge everything from RUNS/ (pad to power-of-two)
+# ====================================================
+
+async def merge_all_runs(
+    *,
+    client: AsyncOpenAI,
+    max_concurrency: int,
+    model: str,
+    reasoning_effort: str = "medium",
+    verbosity: str = "medium",
+    per_request_timeout: Optional[float] = None,
+    runs_dir: str = RUNS_DIR,
+    write_merged_to: Optional[str] = os.path.join(RUNS_DIR, "merged.txt"),
+) -> CompletionResult:
+    """
+    Load all RUNS/audit_{i} files, pad to a power-of-two by duplicating the last entry,
+    then perform hierarchical_merge. Optionally write the merged output to RUNS/merged.txt.
+    """
+    _ensure_runs_dir(runs_dir)
+    texts = _read_all_audit_texts(runs_dir)
+    if not texts:
+        return CompletionResult(text="", reasoning_tokens=0, output_tokens=0, total_tokens=0)
+
+    texts_p2 = _pad_to_power_of_two(texts)
+    result = await hierarchical_merge(
+        client=client,
+        texts=texts_p2,
+        max_concurrency=max_concurrency,
+        model=model,
+        reasoning_effort=reasoning_effort,
+        verbosity=verbosity,
+        per_request_timeout=per_request_timeout,
+    )
+
+    if write_merged_to:
+        # Atomic write
+        tmp = write_merged_to + ".tmp"
+        with open(tmp, "w", encoding="utf-8") as f:
+            f.write(result.text or "")
+            f.flush()
+            os.fsync(f.fileno())
+        os.replace(tmp, write_merged_to)
+
+    return result
 

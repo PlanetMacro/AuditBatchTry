@@ -1,0 +1,3 @@
+Issue: 1
+Location: println('Hello, world!');
+Description: Rust’s println is a macro and must be invoked as println!, and string literals require double quotes; single quotes create an invalid multi-character char literal and calling println without '!' refers to a non-existent function; correct line: println!("Hello, world!");

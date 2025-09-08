@@ -1,0 +1,3 @@
+Issue: 1
+Location: println!("Hello, world!);
+Description: The string literal is missing a closing double quote, producing an unterminated string literal compilation error. Correct the line to println!("Hello, world!");
