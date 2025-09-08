@@ -1,2 +1,0 @@
-Issue: 1
-Location: println("Hello, world!");, Description: The program fails to compile because println is used as a function instead of the println! macro; add the exclamation mark to fix it: println!("Hello, world!");

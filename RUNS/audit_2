@@ -1,3 +1,0 @@
-Issue: 1
-Location: println("Hello, world!");
-Description: println is a macro in Rust and must be invoked with an exclamation mark (println!("Hello, world!")); calling it like a regular function causes a compile-time error.

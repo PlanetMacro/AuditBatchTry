@@ -1,3 +1,0 @@
-Issue: 1
-Location: println!(“Hello, world!”);
-Description: The line uses smart quotes (“ ”) instead of ASCII double quotes (" "), causing the println! macro invocation to fail to parse and the program to not compile. Replace the smart quotes with straight quotes.

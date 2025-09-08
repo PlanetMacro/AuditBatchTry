@@ -1,3 +1,0 @@
-Issue: 1
-Location: println("Hello, world!");
-Description: The code treats println as a regular function call instead of invoking the println! macro, causing a compile-time error (“expected function, found macro”). Fix by changing it to println!("Hello, world!");.
