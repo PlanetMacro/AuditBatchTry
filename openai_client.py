@@ -1,25 +1,22 @@
-# openai_client.py
 from __future__ import annotations
 
-import asyncio
 import os
 import random
 import re
 import string
 import sys
+import time
 from dataclasses import dataclass
-from typing import List, Tuple, Optional
+from typing import List, Tuple, Optional, Dict, Any
 
-import httpx
-import openai  # for typed exceptions
-from openai import OpenAI, AsyncOpenAI
+import requests
 
 # ----------------------
 # System prompt used for the *generation* step (kept as-is)
 # ----------------------
 SYSTEM_PROMPT = (
     "You are an assistant that has a high degree of freedom in answering from multiple angles"
-    "Issues should have the exact following format: Issue: <NUMBER> <LINEBREAK>, Location: <COPY_OF_LINE>, Description: <TEXT>"
+    "Issues should have the exact following format: Issue: <NUMBER> <LINEBREAK> Location: <COPY_OF_LINE> <LINEBREAK> Description: <TEXT>"
 )
 
 # ----------------------
@@ -30,7 +27,7 @@ MERGE_SYSTEM_PROMPT = (
     "Output MUST contain only issues in exactly this format:\n"
     "Issue: <NUMBER>\nLocation: <COPY_OF_LINE>\nDescription: <TEXT>\n"
     "Rules:\n"
-    " - Compute the set UNION of issues from both reports.\n"
+    " - Compute the semantic set UNION of issues from both reports.\n"
     " - Treat two issues as duplicates if they refer to the same underlying problem OR the same Location (case/whitespace-insensitive), even with wording differences.\n"
     " - When merging duplicates, keep the clearest Description and pick one Location verbatim from either input.\n"
     " - Renumber issues consecutively starting from 1 in the final output.\n"
@@ -43,6 +40,9 @@ MERGE_SYSTEM_PROMPT = (
 
 RUNS_DIR = "RUNS"
 AUDIT_BASENAME_RE = re.compile(r"^audit_(\d+)$")  # files with no extension
+
+API_URL = "https://api.openai.com/v1/responses"
+
 
 def _random_string(min_len: int = 5, max_len: int = 50) -> str:
     """Generate a random alphanumeric string with length in [min_len, max_len]."""
@@ -88,54 +88,13 @@ def load_prompt(prompt_file: str) -> str:
 
 
 # ====================================================
-# Client factories (sync + async)
-# ====================================================
-
-def make_client(api_key: Optional[str] = None, *, timeout_s: float = 600.0, max_retries: int = 4) -> OpenAI:
-    """
-    Synchronous client (kept for compatibility). Prefer make_async_client for parallel runs.
-    """
-    return OpenAI(
-        api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-        timeout=timeout_s,
-        max_retries=max_retries,
-    )
-
-
-def make_async_client(
-    api_key: Optional[str] = None,
-    *,
-    timeout_s: float = 600.0,
-    max_retries: int = 4,
-    use_aiohttp: bool = True,
-) -> AsyncOpenAI:
-    """
-    Create a single AsyncOpenAI client to be reused across all concurrent tasks.
-    Set use_aiohttp=True if you installed: pip install "openai[aiohttp]"
-    """
-    if use_aiohttp:
-        from openai import DefaultAioHttpClient  # optional backend
-        return AsyncOpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-            timeout=timeout_s,
-            max_retries=max_retries,
-            http_client=DefaultAioHttpClient(),
-        )
-    else:
-        return AsyncOpenAI(
-            api_key=api_key or os.environ.get("OPENAI_API_KEY"),
-            timeout=timeout_s,
-            max_retries=max_retries,
-        )
-
-
-# ====================================================
 # Filesystem helpers (RUNS/)
 # ====================================================
 
 def _ensure_runs_dir(path: str = RUNS_DIR) -> None:
     """Create RUNS directory if missing."""
     os.makedirs(path, exist_ok=True)
+
 
 def _list_audit_files(path: str = RUNS_DIR) -> List[Tuple[int, str]]:
     """
@@ -153,6 +112,7 @@ def _list_audit_files(path: str = RUNS_DIR) -> List[Tuple[int, str]]:
     out.sort(key=lambda t: t[0])
     return out
 
+
 def _next_run_index_and_remaining(n_desired: int, path: str = RUNS_DIR) -> Tuple[int, int, int]:
     """
     Given desired total runs (n_desired), returns:
@@ -164,6 +124,7 @@ def _next_run_index_and_remaining(n_desired: int, path: str = RUNS_DIR) -> Tuple
     next_index = files[-1][0] + 1 if files else 1
     to_run_now = max(0, n_desired - already_existing)
     return next_index, already_existing, to_run_now
+
 
 def _write_audit_file(run_index: int, text: str, path: str = RUNS_DIR) -> str:
     """
@@ -180,6 +141,7 @@ def _write_audit_file(run_index: int, text: str, path: str = RUNS_DIR) -> str:
     os.replace(tmp, target)
     return target
 
+
 def _read_all_audit_texts(path: str = RUNS_DIR) -> List[str]:
     """Read all RUNS/audit_{i} files (sorted by i) and return their contents as a list of strings."""
     files = _list_audit_files(path)
@@ -189,8 +151,10 @@ def _read_all_audit_texts(path: str = RUNS_DIR) -> List[str]:
             texts.append(f.read())
     return texts
 
+
 def _is_power_of_two(n: int) -> bool:
     return n > 0 and (n & (n - 1)) == 0
+
 
 def _pad_to_power_of_two(texts: List[str]) -> List[str]:
     """
@@ -211,217 +175,285 @@ def _pad_to_power_of_two(texts: List[str]) -> List[str]:
 
 
 # ====================================================
-# Response extraction
+# HTTP + Responses API helpers (sync, response-loop style)
 # ====================================================
 
-def _extract_text(resp) -> str:
-    """
-    Extract the unified text from a Responses API result.
-    """
-    txt = getattr(resp, "output_text", None)
-    if isinstance(txt, str) and txt.strip():
-        return txt
-
-    parts: List[str] = []
-    for item in getattr(resp, "output", []) or []:
-        if getattr(item, "type", None) == "message":
-            for content in getattr(item, "content", []) or []:
-                t = getattr(content, "text", None)
-                if t:
-                    parts.append(t)
-    return "".join(parts).strip()
+class OpenAIResponseError(Exception):
+    """Raised when the OpenAI Responses API returns an error or the network request fails."""
 
 
-def _extract_usage(resp) -> Tuple[int, int, int]:
+def _make_headers(api_key: str) -> Dict[str, str]:
+    if not api_key:
+        raise OpenAIResponseError("OpenAI API key is missing.")
+    return {
+        "Authorization": f"Bearer {api_key}",
+        "Content-Type": "application/json",
+    }
+
+
+def _safe_request(method: str, url: str, headers: Dict[str, str], **kwargs) -> Dict[str, Any]:
     """
-    Extract (reasoning_tokens, output_tokens, total_tokens) if present.
+    Perform an HTTP request and return parsed JSON on success.
+    Raises OpenAIResponseError on any HTTP or network error.
     """
-    usage = getattr(resp, "usage", None)
-    rt = getattr(getattr(usage, "output_tokens_details", None), "reasoning_tokens", 0) or 0
-    ot = getattr(usage, "output_tokens", 0) or 0
-    tt = getattr(usage, "total_tokens", 0) or 0
-    return int(rt), int(ot), int(tt)
+    try:
+        resp = requests.request(method, url, headers=headers, **kwargs)
+    except requests.exceptions.RequestException as e:
+        raise OpenAIResponseError(f"Request failed: {e}") from e
+
+    if resp.status_code != 200:
+        try:
+            data = resp.json()
+        except ValueError:
+            data = None
+
+        if isinstance(data, dict):
+            err = data.get("error")
+            if isinstance(err, dict) and err.get("message"):
+                raise OpenAIResponseError(str(err["message"]))
+        raise OpenAIResponseError(f"{resp.status_code} {resp.reason}")
+
+    try:
+        return resp.json()
+    except ValueError as e:
+        raise OpenAIResponseError("Failed to decode JSON from Responses API") from e
+
+
+def _extract_output_text(response_json: Dict[str, Any]) -> str:
+    """
+    Extract assistant text from the Responses API JSON structure.
+    """
+    out = response_json.get("output")
+    if not isinstance(out, list):
+        return ""
+    texts: List[str] = []
+    for item in out:
+        if not isinstance(item, dict):
+            continue
+        if item.get("type") != "message":
+            continue
+        content = item.get("content", [])
+        if not isinstance(content, list):
+            continue
+        for part in content:
+            if not isinstance(part, dict):
+                continue
+            if part.get("type") == "output_text":
+                t = part.get("text")
+                if isinstance(t, str):
+                    texts.append(t)
+    return "\n".join(texts).strip()
+
+
+def _extract_usage(response_json: Dict[str, Any]) -> Tuple[int, int, int]:
+    """
+    Extract (reasoning_tokens, output_tokens, total_tokens) from the Responses API JSON.
+    """
+    usage = response_json.get("usage") or {}
+    details = usage.get("output_tokens_details") or {}
+    rt = int(details.get("reasoning_tokens") or 0)
+    ot = int(usage.get("output_tokens") or 0)
+    tt = int(usage.get("total_tokens") or 0)
+    return rt, ot, tt
+
+
+def _extract_error_message(response_json: Dict[str, Any]) -> str:
+    """
+    Try to extract a meaningful error/incomplete message from a Responses API JSON.
+    """
+    err = response_json.get("error")
+    if isinstance(err, dict):
+        msg = err.get("message")
+        if isinstance(msg, str) and msg:
+            return msg
+
+    inc = response_json.get("incomplete_details")
+    if isinstance(inc, dict):
+        msg = inc.get("message") or inc.get("reason")
+        if isinstance(msg, str) and msg:
+            return msg
+
+    status = response_json.get("status")
+    if isinstance(status, str):
+        return f"Request finished with status={status!r} but no error message was provided."
+    return "Unknown error"
+
+
+def _start_response_job(headers: Dict[str, str], payload: Dict[str, Any]) -> str:
+    """
+    Create a Responses job (background=True) and return the response ID.
+    """
+    body = dict(payload)
+    body.setdefault("background", True)
+    body.setdefault("store", True)
+
+    data = _safe_request("POST", API_URL, headers=headers, json=body)
+    resp_id = data.get("id")
+    if not isinstance(resp_id, str) or not resp_id:
+        raise OpenAIResponseError("No response ID returned from Responses API create call.")
+    return resp_id
+
+
+def _poll_response(headers: Dict[str, str], resp_id: str, poll_interval_sec: float = 4.0) -> Dict[str, Any]:
+    """
+    Poll GET /responses/{id} until a terminal status is reached. Returns final JSON on success.
+    Raises OpenAIResponseError if the job fails, is cancelled, or is incomplete.
+    """
+    terminal_statuses = {"completed", "failed", "cancelled", "incomplete"}
+    transient_statuses = {"queued", "in_progress"}
+
+    while True:
+        data = _safe_request("GET", f"{API_URL}/{resp_id}", headers=headers)
+        status = data.get("status") or "unknown"
+
+        if status in transient_statuses:
+            time.sleep(poll_interval_sec)
+            continue
+
+        if status == "completed":
+            return data
+
+        if status in terminal_statuses:
+            msg = _extract_error_message(data)
+            raise OpenAIResponseError(f"Response {resp_id} ended with status={status}: {msg}")
+
+        raise OpenAIResponseError(f"Response {resp_id} has unknown terminal status={status!r}.")
+
+
+def _create_and_poll(headers: Dict[str, str], payload: Dict[str, Any], poll_interval_sec: float = 4.0) -> Dict[str, Any]:
+    """
+    Utility for merge calls where we don't need to start multiple jobs before polling.
+    """
+    resp_id = _start_response_job(headers, payload)
+    return _poll_response(headers, resp_id, poll_interval_sec=poll_interval_sec)
 
 
 # ====================================================
-# Single-call wrappers (sync + async)
+# Generation: get N audit runs (response-loop, no local async)
 # ====================================================
 
-def _one_call(
-    client: OpenAI,
-    prompt: str,
+def generate_runs(
     *,
-    model: str,
-    reasoning_effort: str,
-    verbosity: str,
-):
-    """
-    Synchronous Responses API call (kept for completeness).
-    """
-    return client.responses.create(
-        model=model,
-        reasoning={"effort": reasoning_effort},
-        text={"verbosity": verbosity, "format": {"type": "text"}},
-        input=prompt,
-        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}], # run program + search
-        tools=[{"type": "web_search"}], # search
-    )
-
-
-def _complete_once(
-    client: OpenAI,
-    user_prompt: str,
-    *,
-    model: str,
-    reasoning_effort: str,
-    verbosity: str,
-) -> CompletionResult:
-    """
-    Synchronous single completion (not used by the async runner).
-    """
-    comment = _random_string(5, 50)
-    final_prompt = f"{SYSTEM_PROMPT}\n\n' IGNORE THIS COMMENT: {comment}\n\n{user_prompt}"
-
-    resp = _one_call(
-        client,
-        final_prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        verbosity=verbosity,
-    )
-    text = _extract_text(resp) or "[empty]"
-    rt, ot, tt = _extract_usage(resp)
-    return CompletionResult(text=text, reasoning_tokens=rt, output_tokens=ot, total_tokens=tt)
-
-
-async def _one_call_async(
-    client: AsyncOpenAI,
-    prompt: str,
-    *,
-    model: str,
-    reasoning_effort: str,
-    verbosity: str,
-    per_request_timeout: Optional[float] = None,
-):
-    """
-    Asynchronous Responses API call with optional per-request timeout override.
-    """
-    c = client.with_options(timeout=per_request_timeout) if per_request_timeout else client
-    return await c.responses.create(
-        model=model,
-        reasoning={"effort": reasoning_effort},
-        text={"verbosity": verbosity, "format": {"type": "text"}},
-        input=prompt,
-        # tools=[{"type": "web_search"}, {"type": "code_interpreter", "container": {"type": "auto"}}], # run program + search
-        tools=[{"type": "web_search"}], # search
-    )
-
-
-async def _complete_once_async(
-    client: AsyncOpenAI,
-    user_prompt: str,
-    *,
-    model: str,
-    reasoning_effort: str,
-    verbosity: str,
-    per_request_timeout: Optional[float] = None,
-) -> CompletionResult:
-    """
-    Asynchronous single completion.
-    """
-    comment = _random_string(5, 50)
-    final_prompt = f"{SYSTEM_PROMPT}\n\n' IGNORE THIS COMMENT: {comment}\n\n{user_prompt}"
-
-    resp = await _one_call_async(
-        client,
-        final_prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        verbosity=verbosity,
-        per_request_timeout=per_request_timeout,
-    )
-    text = _extract_text(resp) or "[empty]"
-    rt, ot, tt = _extract_usage(resp)
-    print("Single request completed")
-    return CompletionResult(text=text, reasoning_tokens=rt, output_tokens=ot, total_tokens=tt)
-
-
-# ====================================================
-# Parallel generation with bounded concurrency + backoff
-# (now with RUNS/ persistence and run-count adjustment)
-# ====================================================
-
-async def run_parallel(
-    *,
-    client: AsyncOpenAI,
+    api_key: str,
     prompt: str,
     n: int,
-    max_concurrency: int,
     model: str,
-    reasoning_effort: str = "medium",
-    verbosity: str = "medium",
-    per_request_timeout: Optional[float] = None,
-    app_retries: int = 2,
-    base_backoff_s: float = 1.0,
+    reasoning_effort: str,
+    verbosity: str,
     runs_dir: str = RUNS_DIR,
+    generation_tools: Optional[List[Dict[str, Any]]] = None,
+    poll_interval_sec: float = 4.0,
 ) -> List[CompletionResult]:
     """
-    Execute up to n total completions, but subtract any existing RUNS/audit_* files first.
-    Each newly produced completion is written to RUNS/audit_{i}.
+    Generate up to n total audit runs for the given prompt.
 
-    Returns a list of CompletionResult for the completions performed in THIS call
-    (length can be less than n if RUNS/ already contains audits).
+    - Uses Responses API with background=True + polling.
+    - Writes each run to RUNS/audit_{i} as soon as that response completes.
+    - Returns CompletionResult entries for the runs created in THIS invocation
+      (existing audit_* files are detected and not regenerated).
     """
     _ensure_runs_dir(runs_dir)
     start_index, already_existing, to_run_now = _next_run_index_and_remaining(n, runs_dir)
 
     if to_run_now <= 0:
-        # Nothing new to produce; all requested runs already exist on disk.
+        print(f"[gen] Nothing to do. {already_existing} runs already in '{runs_dir}'.")
         return []
 
-    sem = asyncio.Semaphore(max(1, min(max_concurrency, to_run_now)))
+    headers = _make_headers(api_key)
 
-    async def _worker(k: int) -> CompletionResult:
-        """
-        k is 0-based index among the new runs that will be executed in THIS invocation.
-        """
-        attempt = 0
-        run_index = start_index + k  # 1-based absolute run id across invocations
-        while True:
-            try:
-                async with sem:
-                    res = await _complete_once_async(
-                        client,
-                        prompt,
-                        model=model,
-                        reasoning_effort=reasoning_effort,
-                        verbosity=verbosity,
-                        per_request_timeout=per_request_timeout,
-                    )
-                    # Persist ONLY the raw audit text (no metadata) as requested.
-                    _write_audit_file(run_index, res.text, runs_dir)
-                    return res
-            except (
-                openai.RateLimitError,
-                openai.APITimeoutError,
-                openai.APIConnectionError,
-                openai.InternalServerError,
-                httpx.TimeoutException,
-                httpx.ReadTimeout,
-                httpx.ConnectTimeout,
-            ) as e:
-                if attempt >= app_retries:
-                    raise
-                delay = base_backoff_s * (2 ** attempt) + random.uniform(0.0, 0.5)
-                await asyncio.sleep(delay)
-                attempt += 1
+    # 1) Start all jobs (background=True), collecting IDs
+    jobs: List[Tuple[int, str]] = []  # (run_index, resp_id)
+    for k in range(to_run_now):
+        run_index = start_index + k
+        comment = _random_string(5, 50)
+        final_prompt = f"{SYSTEM_PROMPT}\n\n' IGNORE THIS COMMENT: {comment}\n\n{prompt}"
 
-    tasks = [asyncio.create_task(_worker(i)) for i in range(to_run_now)]
-    return await asyncio.gather(*tasks)
+        payload: Dict[str, Any] = {
+            "model": model,
+            "input": [
+                {
+                    "role": "user",
+                    "content": [
+                        {"type": "input_text", "text": final_prompt},
+                    ],
+                }
+            ],
+            "reasoning": {"effort": reasoning_effort},
+            "text": {
+                "format": {"type": "text"},
+                "verbosity": verbosity,
+            },
+        }
+        if generation_tools:
+            payload["tools"] = generation_tools
+
+        resp_id = _start_response_job(headers, payload)
+        print(f"[gen] started run {run_index} -> response_id={resp_id}")
+        jobs.append((run_index, resp_id))
+
+    # 2) Poll all jobs; write each audit file as soon as it completes
+    pending = {resp_id for (_, resp_id) in jobs}
+    id_to_index = {resp_id: run_index for (run_index, resp_id) in jobs}
+    results_by_id: Dict[str, CompletionResult] = {}
+
+    terminal_statuses = {"completed", "failed", "cancelled", "incomplete"}
+    transient_statuses = {"queued", "in_progress"}
+
+    while pending:
+        for resp_id in list(pending):
+            data = _safe_request("GET", f"{API_URL}/{resp_id}", headers=headers)
+            status = data.get("status") or "unknown"
+
+            if status in transient_statuses:
+                continue
+
+            if status == "completed":
+                run_index = id_to_index[resp_id]
+                text = _extract_output_text(data) or "[empty]"
+                rt, ot, tt = _extract_usage(data)
+
+                # Persist immediately so this run is safe even if later jobs fail
+                _write_audit_file(run_index, text, runs_dir)
+                print(f"[gen] run {run_index} completed -> {os.path.join(runs_dir, f'audit_{run_index}')}")
+
+                results_by_id[resp_id] = CompletionResult(
+                    text=text,
+                    reasoning_tokens=rt,
+                    output_tokens=ot,
+                    total_tokens=tt,
+                )
+                pending.remove(resp_id)
+                continue
+
+            if status in terminal_statuses:
+                msg = _extract_error_message(data)
+                # At this point, any runs already written to disk stay there.
+                raise OpenAIResponseError(
+                    f"[gen] run {id_to_index.get(resp_id)} failed with status={status}: {msg}"
+                )
+
+            raise OpenAIResponseError(
+                f"[gen] run {id_to_index.get(resp_id)} has unknown terminal status={status!r}"
+            )
+
+        if pending:
+            time.sleep(poll_interval_sec)
+
+    # 3) Build the result list in run-index order from what we stored per ID
+    results: List[CompletionResult] = []
+    for run_index, resp_id in jobs:
+        res = results_by_id.get(resp_id)
+        if res is None:
+            # Should not happen if we only exit the loop when pending is empty,
+            # but keep a defensive check.
+            raise OpenAIResponseError(f"No completion result recorded for response_id={resp_id}")
+        results.append(res)
+
+    return results
 
 
 # ====================================================
-# Merging support (async)
+# Merging support (sync, via Responses API)
 # ====================================================
 
 def _build_merge_prompt(a: str, b: str) -> str:
@@ -438,112 +470,138 @@ def _build_merge_prompt(a: str, b: str) -> str:
     )
 
 
-async def _merge_two_async(
-    client: AsyncOpenAI,
+def _merge_two(
+    *,
+    headers: Dict[str, str],
     a: str,
     b: str,
-    *,
     model: str,
     reasoning_effort: str,
     verbosity: str,
-    per_request_timeout: Optional[float] = None,
+    poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """Merge two issue lists via the LLM, returning the deduplicated union."""
     prompt = _build_merge_prompt(a, b)
-    resp = await _one_call_async(
-        client,
-        prompt,
-        model=model,
-        reasoning_effort=reasoning_effort,
-        verbosity=verbosity,
-        per_request_timeout=per_request_timeout,
-    )
-    text = _extract_text(resp) or "[empty]"
-    rt, ot, tt = _extract_usage(resp)
+    payload: Dict[str, Any] = {
+        "model": model,
+        "input": [
+            {
+                "role": "user",
+                "content": [
+                    {"type": "input_text", "text": prompt},
+                ],
+            }
+        ],
+        "reasoning": {"effort": reasoning_effort},
+        "text": {
+            "format": {"type": "text"},
+            "verbosity": verbosity,
+        },
+    }
+    resp_json = _create_and_poll(headers, payload, poll_interval_sec=poll_interval_sec)
+    text = _extract_output_text(resp_json) or "[empty]"
+    rt, ot, tt = _extract_usage(resp_json)
     return CompletionResult(text=text, reasoning_tokens=rt, output_tokens=ot, total_tokens=tt)
 
 
-async def hierarchical_merge(
+def hierarchical_merge(
     *,
-    client: AsyncOpenAI,
+    api_key: str,
     texts: List[str],
-    max_concurrency: int,
     model: str,
     reasoning_effort: str,
     verbosity: str,
-    per_request_timeout: Optional[float] = None,
+    poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
     Hierarchically merge a list of issue lists by repeatedly merging pairs (binary tree reduction)
-    until a single deduplicated union remains. This bounds prompt size per call.
+    until a single deduplicated union remains.
+
+    Prints progress information because this can be long-running.
     """
     if not texts:
         return CompletionResult(text="", reasoning_tokens=0, output_tokens=0, total_tokens=0)
     if len(texts) == 1:
         return CompletionResult(text=texts[0], reasoning_tokens=0, output_tokens=0, total_tokens=0)
 
+    headers = _make_headers(api_key)
+
     agg_rt = 0
     agg_ot = 0
     agg_tt = 0
     current: List[str] = [t or "" for t in texts]
-    sem = asyncio.Semaphore(max(1, max_concurrency))
+
+    total_merges = max(0, len(current) - 1)
+    completed_merges = 0
+    level = 1
+
+    print(f"[merge] Starting hierarchical merge: {len(current)} reports, {total_merges} pairwise merges needed.")
 
     while len(current) > 1:
-        pairs: List[Tuple[str, str]] = []
+        level_input_count = len(current)
+        print(f"[merge] Level {level}: {level_input_count} partial reports to merge.")
+
+        next_round: List[str] = []
+        merges_this_level = 0
+
         i = 0
         while i < len(current):
             a = current[i]
             b = current[i + 1] if i + 1 < len(current) else ""
-            pairs.append((a, b))
             i += 2
 
-        tasks = []
-        carried_forward: List[str] = []
-        for a, b in pairs:
-            if b.strip():
-                async def job(a=a, b=b):
-                    async with sem:
-                        return await _merge_two_async(
-                            client,
-                            a,
-                            b,
-                            model=model,
-                            reasoning_effort=reasoning_effort,
-                            verbosity=verbosity,
-                            per_request_timeout=per_request_timeout,
-                        )
-                tasks.append(asyncio.create_task(job()))
-            else:
-                carried_forward.append(a)
+            if not b.strip():
+                # Odd one out, carry forward unchanged.
+                next_round.append(a)
+                continue
 
-        merged_texts: List[str] = []
-        if tasks:
-            results: List[CompletionResult] = await asyncio.gather(*tasks)
-            for r in results:
-                merged_texts.append(r.text)
-                agg_rt += r.reasoning_tokens
-                agg_ot += r.output_tokens
-                agg_tt += r.total_tokens
+            # Perform one merge
+            result = _merge_two(
+                headers=headers,
+                a=a,
+                b=b,
+                model=model,
+                reasoning_effort=reasoning_effort,
+                verbosity=verbosity,
+                poll_interval_sec=poll_interval_sec,
+            )
+            next_round.append(result.text)
 
-        current = merged_texts + carried_forward
+            merges_this_level += 1
+            completed_merges += 1
+            agg_rt += result.reasoning_tokens
+            agg_ot += result.output_tokens
+            agg_tt += result.total_tokens
 
+            print(
+                f"[merge]   completed merge {completed_merges}/{total_merges} "
+                f"(level {level}, this level: {merges_this_level})"
+            )
+
+        current = next_round
+        print(
+            f"[merge] Level {level} done: {len(current)} partial reports remain, "
+            f"{total_merges - completed_merges} merges left."
+        )
+        level += 1
+
+    print("[merge] Hierarchical merge complete.")
     return CompletionResult(text=current[0], reasoning_tokens=agg_rt, output_tokens=agg_ot, total_tokens=agg_tt)
 
 
 # ====================================================
-# New: Merge everything from RUNS/ (pad to power-of-two)
+# Merge everything from RUNS/ (pad to power-of-two)
 # ====================================================
 
-async def merge_all_runs(
+def merge_all_runs(
     *,
-    client: AsyncOpenAI,
-    max_concurrency: int,
+    api_key: str,
     model: str,
     reasoning_effort: str = "medium",
     verbosity: str = "medium",
-    per_request_timeout: Optional[float] = None,
     runs_dir: str = RUNS_DIR,
     write_merged_to: Optional[str] = os.path.join(RUNS_DIR, "merged.txt"),
+    poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
     Load all RUNS/audit_{i} files, pad to a power-of-two by duplicating the last entry,
@@ -552,27 +610,32 @@ async def merge_all_runs(
     _ensure_runs_dir(runs_dir)
     texts = _read_all_audit_texts(runs_dir)
     if not texts:
+        print("[merge] No audit_* files found; nothing to merge.")
         return CompletionResult(text="", reasoning_tokens=0, output_tokens=0, total_tokens=0)
 
+    print(f"[merge] Loaded {len(texts)} audit reports from '{runs_dir}'.")
     texts_p2 = _pad_to_power_of_two(texts)
-    result = await hierarchical_merge(
-        client=client,
+
+    if len(texts_p2) != len(texts):
+        print(f"[merge] Padded reports to power-of-two: {len(texts)} -> {len(texts_p2)} entries.")
+
+    result = hierarchical_merge(
+        api_key=api_key,
         texts=texts_p2,
-        max_concurrency=max_concurrency,
         model=model,
         reasoning_effort=reasoning_effort,
         verbosity=verbosity,
-        per_request_timeout=per_request_timeout,
+        poll_interval_sec=poll_interval_sec,
     )
 
     if write_merged_to:
-        # Atomic write
         tmp = write_merged_to + ".tmp"
         with open(tmp, "w", encoding="utf-8") as f:
             f.write(result.text or "")
             f.flush()
             os.fsync(f.fileno())
         os.replace(tmp, write_merged_to)
+        print(f"[merge] Final merged report written to '{write_merged_to}'.")
 
     return result
 

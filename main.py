@@ -1,7 +1,6 @@
 #!/usr/bin/env python3
 from __future__ import annotations
 
-import asyncio
 import os
 import shutil
 
@@ -9,12 +8,18 @@ from api_key_crypto import get_api_key
 import openai_client as oc
 
 # ================== Configuration ==================
-LOG_NUMBER_OF_BATCHES = 3          # total completions = 2**LOG_NUMBER_OF_BATCHES
-MODEL = "gpt-5"                    # GPT-5 reasoning model
+LOG_NUMBER_OF_BATCHES = 4          # total completions = 2**LOG_NUMBER_OF_BATCHES
+
+# Generation config (for individual audits)
+MODEL = "gpt-5-pro"                # e.g. "gpt-5-pro"
 REASONING_EFFORT = "high"          # minimal | low | medium | high
-VERBOSITY = "high"                 # low | medium | high (steers visible length)
-MAX_CONCURRENCY = 8                # throttle to respect RPM/TPM
-PER_REQUEST_TIMEOUT = 86400        # limit per request (seconds)
+VERBOSITY = "high"                 # low | medium | high
+
+# Merge config (can be cheaper / less effort)
+MERGE_MODEL = "gpt-5"         # or just MODEL if you prefer
+MERGE_REASONING_EFFORT = "medium"  # merges are usually easier
+MERGE_VERBOSITY = "high"         # often enough for merged output
+
 PROMPT_FILE = "PUT_PROMPT_HERE.txt"
 OUTPUT_FILE = "AUDIT_RESULT.txt"
 # ====================================================
@@ -55,65 +60,52 @@ def main() -> None:
     n = 1 << LOG_NUMBER_OF_BATCHES
     print(f"MODEL={MODEL} | target_completions={n} | reasoning={REASONING_EFFORT} | verbosity={VERBOSITY}")
 
-    async def _async_main():
-        client = oc.make_async_client(
-            api_key,
-            timeout_s=PER_REQUEST_TIMEOUT,   # SDK-level total timeout per request
-            max_retries=4,                   # SDK-level retries
-            use_aiohttp=True,                # requires: pip install "openai[aiohttp]"
-        )
-        try:
-            # Generation: oc.run_parallel writes each run to RUNS/audit_{i} and
-            # automatically subtracts existing RUNS/audit_* files from 'n'.
-            print(f"Generating up to {n} audit reports (subtracting any existing runs in '{oc.RUNS_DIR}').")
-            results = await oc.run_parallel(
-                client=client,
-                prompt=prompt,
-                n=n,
-                max_concurrency=MAX_CONCURRENCY,
-                model=MODEL,
-                reasoning_effort=REASONING_EFFORT,
-                verbosity=VERBOSITY,
-                per_request_timeout=PER_REQUEST_TIMEOUT,
-                app_retries=2,
-            )
+    # Generation: writes each run to RUNS/audit_{i} and auto-subtracts existing files.
+    print(f"Generating up to {n} audit reports (subtracting any existing runs in '{oc.RUNS_DIR}').")
+    gen_results = oc.generate_runs(
+        api_key=api_key,
+        prompt=prompt,
+        n=n,
+        model=MODEL,
+        reasoning_effort=REASONING_EFFORT,
+        verbosity=VERBOSITY,
+        runs_dir=oc.RUNS_DIR,
+        generation_tools=[{"type": "web_search"}],  # hosted web_search tool for generation
+    )
 
-            # Usage accounting for the generation phase (new runs only)
-            gen_reasoning = sum(r.reasoning_tokens for r in results)
-            gen_output = sum(r.output_tokens for r in results)
-            gen_total = sum(r.total_tokens for r in results)
+    # Usage accounting for the generation phase (new runs only)
+    gen_reasoning = sum(r.reasoning_tokens for r in gen_results)
+    gen_output = sum(r.output_tokens for r in gen_results)
+    gen_total = sum(r.total_tokens for r in gen_results)
 
-            # Merge: read ALL RUNS/audit_* files, pad to a power of two, then merge.
-            print(f"Merging all reports found in '{oc.RUNS_DIR}' (padding to next power of two if needed).")
-            merged = await oc.merge_all_runs(
-                client=client,
-                max_concurrency=MAX_CONCURRENCY,
-                model=MODEL,
-                reasoning_effort=REASONING_EFFORT,
-                verbosity=VERBOSITY,
-                per_request_timeout=PER_REQUEST_TIMEOUT,
-                runs_dir=oc.RUNS_DIR,
-                write_merged_to=os.path.join(oc.RUNS_DIR, "merged.txt"),
-            )
+    # 2) Merge: read ALL RUNS/audit_* files, pad to a power of two, then merge.
+    print(
+        f"Merging all reports found in '{oc.RUNS_DIR}' "
+        f"(padding to next power of two if needed) using "
+        f"MERGE_MODEL={MERGE_MODEL}, reasoning={MERGE_REASONING_EFFORT}, verbosity={MERGE_VERBOSITY}"
+    )
+    merged = oc.merge_all_runs(
+        api_key=api_key,
+        model=MERGE_MODEL,
+        reasoning_effort=MERGE_REASONING_EFFORT,
+        verbosity=MERGE_VERBOSITY,
+        runs_dir=oc.RUNS_DIR,
+        write_merged_to=os.path.join(oc.RUNS_DIR, "merged.txt"),
+    )
 
-            # Final output
-            with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
-                f.write((merged.text or "").strip() or "[empty]\n")
+    # Final output
+    with open(OUTPUT_FILE, "w", encoding="utf-8") as f:
+        f.write((merged.text or "").strip() or "[empty]\n")
 
-            print(f"\nMerged result written to {OUTPUT_FILE}")
+    print(f"\nMerged result written to {OUTPUT_FILE}")
 
-            # Usage accounting: generation (this invocation) + merging (all runs)
-            print(
-                "\n[usage]"
-                f" generation: reasoning_tokens={gen_reasoning}  output_tokens={gen_output}  total_tokens={gen_total}"
-                f" | merging: reasoning_tokens={merged.reasoning_tokens}  output_tokens={merged.output_tokens}  total_tokens={merged.total_tokens}"
-                f" | grand_total={gen_total + merged.total_tokens}"
-            )
-        finally:
-            # Properly close the async client to avoid 'coroutine was never awaited' warnings
-            await client.close()
-
-    asyncio.run(_async_main())
+    # Usage accounting: generation (this invocation) + merging (all runs)
+    print(
+        "\n[usage]"
+        f" generation: reasoning_tokens={gen_reasoning}  output_tokens={gen_output}  total_tokens={gen_total}"
+        f" | merging: reasoning_tokens={merged.reasoning_tokens}  output_tokens={merged.output_tokens}  total_tokens={merged.total_tokens}"
+        f" | grand_total={gen_total + merged.total_tokens}"
+    )
 
 
 if __name__ == "__main__":
