@@ -438,7 +438,7 @@ def generate_runs(
     reasoning_effort: str,
     verbosity: str,
     per_request_timeout: Optional[float] = None,  # not used directly; kept for API compatibility
-    app_retries: int = 2,                         # used for start + poll retries
+    app_retries: int = 4,                         # used for start + poll retries
     base_backoff_s: float = 1.0,
     runs_dir: str = RUNS_DIR,
     generation_tools: Optional[List[Dict[str, Any]]] = None,
