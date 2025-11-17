@@ -682,7 +682,8 @@ def hierarchical_merge(
     Hierarchically merge a list of issue lists by repeatedly merging pairs (binary tree reduction)
     until a single deduplicated union remains.
 
-    Prints progress information because this can be long-running.
+    Merging steps on the same level are executed concurrently by using background Responses
+    and a single polling loop for all merges on that level.
     """
     if not texts:
         return CompletionResult(text="", reasoning_tokens=0, output_tokens=0, total_tokens=0)
@@ -702,14 +703,27 @@ def hierarchical_merge(
 
     print(f"[merge] Starting hierarchical merge: {len(current)} reports, {total_merges} pairwise merges needed.")
 
+    # Same retry/backoff style as generate_runs
+    app_retries = 4
+    base_backoff_s = 1.0
+
     while len(current) > 1:
         level_input_count = len(current)
         print(f"[merge] Level {level}: {level_input_count} partial reports to merge.")
 
-        next_round: List[str] = []
-        merges_this_level = 0
+        # Number of outputs at this level (pairs + possible carry)
+        num_slots = (len(current) + 1) // 2
+        next_round: List[Optional[str]] = [None] * num_slots
 
+        # For this level: map response_id -> slot index in next_round
+        respid_to_slot: Dict[str, int] = {}
+        pending = set()
+        poll_fail_counts: Dict[str, int] = {}
+
+        slot_index = 0
         i = 0
+
+        # Start merge jobs for all pairs on this level
         while i < len(current):
             a = current[i]
             b = current[i + 1] if i + 1 < len(current) else ""
@@ -717,33 +731,120 @@ def hierarchical_merge(
 
             if not b.strip():
                 # Odd one out, carry forward unchanged.
-                next_round.append(a)
+                next_round[slot_index] = a
+                slot_index += 1
                 continue
 
-            # Perform one merge
-            result = _merge_two(
-                headers=headers,
-                a=a,
-                b=b,
-                model=model,
-                reasoning_effort=reasoning_effort,
-                verbosity=verbosity,
-                poll_interval_sec=poll_interval_sec,
-            )
-            next_round.append(result.text)
+            prompt = _build_merge_prompt(a, b)
+            payload: Dict[str, Any] = {
+                "model": model,
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+                "reasoning": {"effort": reasoning_effort},
+                "text": {
+                    "format": {"type": "text"},
+                    "verbosity": verbosity,
+                },
+            }
 
-            merges_this_level += 1
-            completed_merges += 1
-            agg_rt += result.reasoning_tokens
-            agg_ot += result.output_tokens
-            agg_tt += result.total_tokens
+            # Start background Responses job for this pair
+            resp_id = _start_response_job(headers, payload)
+            respid_to_slot[resp_id] = slot_index
+            pending.add(resp_id)
 
             print(
-                f"[merge]   completed merge {completed_merges}/{total_merges} "
-                f"(level {level}, this level: {merges_this_level})"
+                f"[merge] started level {level} merge for slot {slot_index} -> response_id={resp_id}"
             )
 
-        current = next_round
+            slot_index += 1
+
+        merges_this_level = 0
+
+        terminal_statuses = {"completed", "failed", "cancelled", "incomplete"}
+        transient_statuses = {"queued", "in_progress"}
+
+        if pending:
+            print(f"[merge] Polling {len(pending)} merge jobs at level {level} until completion.")
+
+        # Poll all merge jobs for this level in a single loop
+        while pending:
+            for resp_id in list(pending):
+                try:
+                    data = _safe_request("GET", f"{API_URL}/{resp_id}", headers=headers)
+                except OpenAIResponseError as e:
+                    count = poll_fail_counts.get(resp_id, 0) + 1
+                    poll_fail_counts[resp_id] = count
+
+                    if count <= app_retries:
+                        delay = base_backoff_s * (2 ** (count - 1)) + random.uniform(0.0, 0.5)
+                        print(
+                            f"[merge] polling error for response {resp_id}, "
+                            f"retry {count}/{app_retries} after {delay:.2f}s: {e}"
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    print(
+                        f"[merge] polling failed for response {resp_id} after {count} attempts: {e}"
+                    )
+                    raise OpenAIResponseError(
+                        f"[merge] polling failed for response {resp_id} after {count} attempts: {e}"
+                    ) from e
+
+                status = data.get("status") or "unknown"
+
+                if status in transient_statuses:
+                    continue
+
+                slot = respid_to_slot[resp_id]
+
+                if status == "completed":
+                    text = _extract_output_text(data) or "[empty]"
+                    rt, ot, tt = _extract_usage(data)
+
+                    next_round[slot] = text
+                    merges_this_level += 1
+                    completed_merges += 1
+                    agg_rt += rt
+                    agg_ot += ot
+                    agg_tt += tt
+
+                    print(
+                        f"[merge]   response {resp_id} completed -> slot {slot}; "
+                        f"merge {completed_merges}/{total_merges} "
+                        f"(level {level}, this level: {merges_this_level})"
+                    )
+                    pending.remove(resp_id)
+                    continue
+
+                if status in terminal_statuses:
+                    msg = _extract_error_message(data)
+                    print(
+                        f"[merge] merge response {resp_id} ended with status={status}: {msg}"
+                    )
+                    raise OpenAIResponseError(
+                        f"[merge] merge response {resp_id} ended with status={status}: {msg}"
+                    )
+
+                print(
+                    f"[merge] merge response {resp_id} has unknown terminal status={status!r}."
+                )
+                raise OpenAIResponseError(
+                    f"[merge] merge response {resp_id} has unknown terminal status={status!r}."
+                )
+
+            if pending:
+                time.sleep(poll_interval_sec)
+
+        # All merges on this level finished; carry forward results
+        current = [(t or "") for t in next_round]
+
         print(
             f"[merge] Level {level} done: {len(current)} partial reports remain, "
             f"{total_merges - completed_merges} merges left."
@@ -922,6 +1023,7 @@ def format_issues_incremental(
     verbosity: str = "high",
     runs_dir: str = RUNS_DIR,
     poll_interval_sec: float = 4.0,
+    max_parallel_issues: int = 8,
 ) -> CompletionResult:
     """
     Incremental, crash-resilient formatter.
@@ -930,15 +1032,12 @@ def format_issues_incremental(
       - Split merged_text into individual issues (Issue: N / Location / Description).
       - For each issue:
           * If RUNS/formatted_issue_<N>.txt exists, it is reused (skipped).
-          * Otherwise, send ONLY that issue to the LLM for triage+formatting.
-            The result is written immediately to RUNS/formatted_issue_<N>.txt.
-            Empty output means "not an attackable issue"; we still create the file.
-      - After each newly formatted issue, rebuild final_output_path by concatenating
-        all non-empty formatted_issue_* files, renumbering issues from 1.
-
-    On rerun after a crash:
-      - Existing formatted_issue_* files are detected and skipped, so only the
-        still-missing issues are reformatted.
+          * Otherwise, issues are formatted in chunks of up to max_parallel_issues in parallel:
+              - Start background Responses jobs for all issues in the chunk.
+              - Poll all of them together (single response loop), similar to generate_runs/merge.
+              - As each job completes, write RUNS/formatted_issue_<N>.txt immediately.
+              - After each newly formatted issue, rebuild final_output_path by concatenating
+                all non-empty formatted_issue_* files, renumbering issues from 1.
     """
     if not merged_text or not merged_text.strip():
         print("[format] Empty merged text; nothing to format.")
@@ -961,75 +1060,200 @@ def format_issues_incremental(
 
     print(f"[format] Incremental formatting of {len(issues)} issues.")
 
+    # Determine which issues still need formatting
+    pending_issues: List[Tuple[int, str]] = []
     for issue_number, block in issues:
         path = _formatted_issue_path(issue_number, runs_dir)
         if os.path.exists(path):
             print(f"[format] Issue {issue_number} already formatted; skipping.")
             continue
+        pending_issues.append((issue_number, block))
 
-        comment = _random_string(5, 50)
-        prompt = (
-            f"{ISSUE_FORMAT_SYSTEM_PROMPT}\n\n"
-            f"' IGNORE THIS COMMENT: {comment}\n\n"
-            "Merged issue list:\n"
-            f"{block.strip()}\n\n"
-            "You are given exactly one issue above.\n"
-            "Return ONLY its reformatted version in the exact output format described above.\n"
-            "If the issue is not an attackable security vulnerability, return an empty response.\n"
-            "Since there is only a single issue in this request, use 'Issue 1:' as the heading; "
-            "the final numbering will be adjusted later."
+    total_to_format = len(pending_issues)
+    if total_to_format == 0:
+        print("[format] All issues already formatted; rebuilding final report.")
+        _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
+        if os.path.exists(final_output_path):
+            with open(final_output_path, "r", encoding="utf-8") as f:
+                full_text = f.read()
+        else:
+            full_text = ""
+        return CompletionResult(text=full_text, reasoning_tokens=0, output_tokens=0, total_tokens=0)
+
+    print(f"[format] {total_to_format} issues require formatting in this run.")
+    formatted_now = 0
+
+    # Retry/backoff config analogous to generate_runs/merge
+    app_retries = 4
+    base_backoff_s = 1.0
+
+    terminal_statuses = {"completed", "failed", "cancelled", "incomplete"}
+    transient_statuses = {"queued", "in_progress"}
+
+    idx = 0
+    while idx < len(pending_issues):
+        chunk = pending_issues[idx : idx + max_parallel_issues]
+        idx += max_parallel_issues
+
+        print(
+            f"[format] Starting formatting chunk of {len(chunk)} issues "
+            f"(formatted so far: {formatted_now}/{total_to_format})."
         )
 
-        payload: Dict[str, Any] = {
-            "model": model,
-            "tools": [ {"type": "web_search"} ],   # web_search for opening links
-            "input": [
-                {
-                    "role": "user",
-                    "content": [
-                        {"type": "input_text", "text": prompt},
-                    ],
-                }
-            ],
-            "reasoning": {"effort": reasoning_effort},
-            "text": {
-                "format": {"type": "text"},
-                "verbosity": verbosity,
-            },
-        }
+        # Start background jobs for this chunk
+        jobs: Dict[str, int] = {}  # resp_id -> issue_number
+        poll_fail_counts: Dict[str, int] = {}
 
-        try:
-            resp_json = _create_and_poll(headers, payload, poll_interval_sec=poll_interval_sec)
-        except OpenAIResponseError as e:
-            print(f"[format] Error while formatting issue {issue_number}: {e}. Will retry on next run.")
-            # Do not create a formatted_issue file; this issue will be retried.
-            continue
+        for issue_number, block in chunk:
+            comment = _random_string(5, 50)
+            prompt = (
+                f"{ISSUE_FORMAT_SYSTEM_PROMPT}\n\n"
+                f"' IGNORE THIS COMMENT: {comment}\n\n"
+                "Merged issue list:\n"
+                f"{block.strip()}\n\n"
+                "You are given exactly one issue above.\n"
+                "Return ONLY its reformatted version in the exact output format described above.\n"
+                "If the issue is not an attackable security vulnerability, return an empty response.\n"
+                "Since there is only a single issue in this request, use 'Issue 1:' as the heading; "
+                "the final numbering will be adjusted later."
+            )
 
-        text = _extract_output_text(resp_json) or ""
-        rt, ot, tt = _extract_usage(resp_json)
-        agg_rt += rt
-        agg_ot += ot
-        agg_tt += tt
+            payload: Dict[str, Any] = {
+                "model": model,
+                "tools": [{"type": "web_search"}],
+                "input": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {"type": "input_text", "text": prompt},
+                        ],
+                    }
+                ],
+                "reasoning": {"effort": reasoning_effort},
+                "text": {
+                    "format": {"type": "text"},
+                    "verbosity": verbosity,
+                },
+            }
 
-        # Persist this issue's result (even if empty) atomically.
-        tmp = path + ".tmp"
-        with open(tmp, "w", encoding="utf-8") as f:
-            f.write(text.strip())
-            f.flush()
-            os.fsync(f.fileno())
-        os.replace(tmp, path)
-        print(f"[format] Issue {issue_number} formatted and stored at '{path}'.")
+            attempt = 0
+            while True:
+                try:
+                    resp_id = _start_response_job(headers, payload)
+                    print(
+                        f"[format] started formatting issue {issue_number} "
+                        f"-> response_id={resp_id}"
+                    )
+                    jobs[resp_id] = issue_number
+                    break
+                except OpenAIResponseError as e:
+                    attempt += 1
+                    if attempt > app_retries:
+                        print(
+                            f"[format] giving up starting formatting for issue {issue_number} "
+                            f"after {app_retries} retries: {e}. Will retry on next run."
+                        )
+                        break
+                    delay = base_backoff_s * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
+                    print(
+                        f"[format] start error for issue {issue_number}, "
+                        f"retry {attempt}/{app_retries} after {delay:.2f}s: {e}"
+                    )
+                    time.sleep(delay)
 
-        # Rebuild the final report after each new issue.
-        _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
-        print(f"[format] Final report updated at '{final_output_path}'.")
+        pending_resp_ids = set(jobs.keys())
+        if pending_resp_ids:
+            print(
+                f"[format] Polling {len(pending_resp_ids)} formatting jobs in current chunk "
+                f"(max_parallel_issues={max_parallel_issues})."
+            )
 
-    # Ensure final report is up to date even if no new issues were formatted.
+        # Poll all jobs for this chunk
+        while pending_resp_ids:
+            for resp_id in list(pending_resp_ids):
+                issue_number = jobs[resp_id]
+
+                try:
+                    data = _safe_request("GET", f"{API_URL}/{resp_id}", headers=headers)
+                except OpenAIResponseError as e:
+                    count = poll_fail_counts.get(resp_id, 0) + 1
+                    poll_fail_counts[resp_id] = count
+
+                    if count <= app_retries:
+                        delay = base_backoff_s * (2 ** (count - 1)) + random.uniform(0.0, 0.5)
+                        print(
+                            f"[format] polling error for issue {issue_number}, "
+                            f"retry {count}/{app_retries} after {delay:.2f}s: {e}"
+                        )
+                        time.sleep(delay)
+                        continue
+
+                    print(
+                        f"[format] polling failed for issue {issue_number} after {count} attempts: {e}. "
+                        f"Will retry on next run."
+                    )
+                    pending_resp_ids.remove(resp_id)
+                    continue
+
+                status = data.get("status") or "unknown"
+
+                if status in transient_statuses:
+                    continue
+
+                path = _formatted_issue_path(issue_number, runs_dir)
+
+                if status == "completed":
+                    text = _extract_output_text(data) or ""
+                    rt, ot, tt = _extract_usage(data)
+                    agg_rt += rt
+                    agg_ot += ot
+                    agg_tt += tt
+
+                    # Persist this issue's result (even if empty) atomically.
+                    tmp = path + ".tmp"
+                    with open(tmp, "w", encoding="utf-8") as f:
+                        f.write(text.strip())
+                        f.flush()
+                        os.fsync(f.fileno())
+                    os.replace(tmp, path)
+                    print(f"[format] Issue {issue_number} formatted and stored at '{path}'.")
+
+                    # Rebuild the final report after each new issue.
+                    _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
+                    print(f"[format] Final report updated at '{final_output_path}'.")
+
+                    formatted_now += 1
+                    print(
+                        f"[format] Progress: formatted {formatted_now}/{total_to_format} "
+                        f"issues in this run."
+                    )
+
+                    pending_resp_ids.remove(resp_id)
+                    continue
+
+                if status in terminal_statuses:
+                    msg = _extract_error_message(data)
+                    print(
+                        f"[format] Formatting issue {issue_number} ended with status={status}: {msg}. "
+                        f"Will retry on next run."
+                    )
+                    pending_resp_ids.remove(resp_id)
+                    continue
+
+                print(
+                    f"[format] Formatting issue {issue_number} returned unknown terminal status={status!r}. "
+                    f"Will retry on next run."
+                )
+                pending_resp_ids.remove(resp_id)
+
+            if pending_resp_ids:
+                time.sleep(poll_interval_sec)
+
+    # Ensure final report is up to date even if no new issues were formatted in this run
     if os.path.exists(final_output_path):
         with open(final_output_path, "r", encoding="utf-8") as f:
             full_text = f.read()
     else:
-        # Try to build it once from whatever formatted_issue_* files we have.
         _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
         if os.path.exists(final_output_path):
             with open(final_output_path, "r", encoding="utf-8") as f:
@@ -1039,7 +1263,6 @@ def format_issues_incremental(
 
     print("[format] Incremental issue formatting completed.")
     return CompletionResult(text=full_text, reasoning_tokens=agg_rt, output_tokens=agg_ot, total_tokens=agg_tt)
-
 
 
 def format_issues(

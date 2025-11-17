@@ -24,6 +24,7 @@ MERGE_VERBOSITY = "high"           # often enough for merged output
 FORMAT_MODEL = "gpt-5-pro"
 FORMAT_REASONING_EFFORT = "high"
 FORMAT_VERBOSITY = "high"
+FORMAT_MAX_PARALLEL_ISSUES = 8     # max number of issues to format in parallel
 
 PROMPT_FILE = "PUT_PROMPT_HERE.txt"
 OUTPUT_FILE = "AUDIT_RESULT.txt"
@@ -128,6 +129,7 @@ def main() -> None:
         final_output_path=OUTPUT_FILE,
         reasoning_effort=FORMAT_REASONING_EFFORT,
         verbosity=FORMAT_VERBOSITY,
+        max_parallel_issues=FORMAT_MAX_PARALLEL_ISSUES,
     )
 
     if (formatted.text or "").strip():
