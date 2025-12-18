@@ -16,7 +16,7 @@ from typing import Any, Optional
 
 from auditbatchtry import config as audit_config
 from auditbatchtry import openai_client as oc
-from auditbatchtry.api_key_crypto import decrypt_api_key, json_to_blob
+from auditbatchtry.api_key_crypto import blob_to_json, decrypt_api_key, encrypt_api_key, json_to_blob
 from cryptography.exceptions import InvalidTag
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -215,6 +215,20 @@ def _get_api_key_or_raise() -> str:
     )
 
 
+def _write_secure_file(path: Path, content: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    tmp = path.with_suffix(path.suffix + ".tmp")
+    with open(tmp, "w", encoding="utf-8") as f:
+        f.write(content)
+        f.flush()
+        os.fsync(f.fileno())
+    try:
+        os.chmod(tmp, 0o600)
+    except Exception:
+        pass
+    os.replace(tmp, path)
+
+
 def _new_token() -> str:
     token = uuid.uuid4().hex
     with STATE_LOCK:
@@ -375,6 +389,12 @@ class ProjectUpdate(BaseModel):
 
 class AuthUnlock(BaseModel):
     password: str
+
+
+class AuthSetup(BaseModel):
+    api_key: str
+    password: str
+    password_confirm: Optional[str] = None
 
 
 class ProjectConfig(BaseModel):
@@ -783,6 +803,32 @@ def api_auth_unlock(body: AuthUnlock) -> dict[str, Any]:
 
     token = _new_token()
     return {"unlocked": True, "token": token}
+
+
+@app.post("/api/auth/setup")
+def api_auth_setup(body: AuthSetup) -> dict[str, Any]:
+    global API_KEY_CACHE
+
+    api_key = (body.api_key or "").strip()
+    password = (body.password or "").strip()
+    confirm = (body.password_confirm or "").strip()
+
+    if not api_key:
+        raise HTTPException(status_code=400, detail="API key required")
+    if not password:
+        raise HTTPException(status_code=400, detail="Password required")
+    if body.password_confirm is not None and password != confirm:
+        raise HTTPException(status_code=400, detail="Passwords do not match")
+
+    if KEY_FILE.exists():
+        raise HTTPException(status_code=409, detail="Key file already exists")
+
+    blob = encrypt_api_key(api_key, password)
+    _write_secure_file(KEY_FILE, blob_to_json(blob))
+    API_KEY_CACHE = api_key
+
+    token = _new_token()
+    return {"unlocked": True, "token": token, "has_key_file": True}
 
 
 @app.post("/api/auth/token")

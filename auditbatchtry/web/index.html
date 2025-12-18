@@ -113,6 +113,39 @@
       </div>
     </div>
 
+    <div id="setupOverlay" class="overlay" aria-label="Setup" aria-hidden="true">
+      <div class="modal panel">
+        <div class="panel-header">
+          <div>
+            <div class="title">Create API Key Store</div>
+            <div class="hint">No `OPENAI.API_KEY` found. Store your key encrypted with a password.</div>
+          </div>
+        </div>
+        <div class="modal-body">
+          <label class="field">
+            <div class="field-label">OpenAI API Key</div>
+            <input id="setupApiKey" class="input" type="password" autocomplete="off" />
+          </label>
+
+          <div class="grid2">
+            <label class="field">
+              <div class="field-label">Password</div>
+              <input id="setupPassword" class="input" type="password" autocomplete="new-password" />
+            </label>
+            <label class="field">
+              <div class="field-label">Confirm Password</div>
+              <input id="setupPasswordConfirm" class="input" type="password" autocomplete="new-password" />
+            </label>
+          </div>
+
+          <div class="modal-actions">
+            <button class="btn primary" id="setupBtn">Create</button>
+          </div>
+          <div id="setupError" class="modal-error" role="alert"></div>
+        </div>
+      </div>
+    </div>
+
     <div id="settingsOverlay" class="overlay" aria-label="Settings" aria-hidden="true">
       <div class="modal panel">
         <div class="panel-header">

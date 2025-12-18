@@ -21,6 +21,12 @@ const unlockOverlayEl = document.getElementById("unlockOverlay");
 const unlockPasswordEl = document.getElementById("unlockPassword");
 const unlockBtn = document.getElementById("unlockBtn");
 const unlockErrorEl = document.getElementById("unlockError");
+const setupOverlayEl = document.getElementById("setupOverlay");
+const setupApiKeyEl = document.getElementById("setupApiKey");
+const setupPasswordEl = document.getElementById("setupPassword");
+const setupPasswordConfirmEl = document.getElementById("setupPasswordConfirm");
+const setupBtn = document.getElementById("setupBtn");
+const setupErrorEl = document.getElementById("setupError");
 const settingsOverlayEl = document.getElementById("settingsOverlay");
 const closeSettingsBtn = document.getElementById("closeSettingsBtn");
 const saveSettingsBtn = document.getElementById("saveSettingsBtn");
@@ -125,6 +131,7 @@ function clearToken() {
 }
 
 function showUnlockOverlay(message) {
+  hideSetupOverlay();
   unlockErrorEl.textContent = message || "";
   unlockOverlayEl.classList.add("show");
   unlockOverlayEl.setAttribute("aria-hidden", "false");
@@ -139,6 +146,28 @@ function hideUnlockOverlay() {
   unlockPasswordEl.value = "";
   unlockOverlayEl.classList.remove("show");
   unlockOverlayEl.setAttribute("aria-hidden", "true");
+  refreshBtn.disabled = false;
+  newProjectBtn.disabled = false;
+}
+
+function showSetupOverlay(message) {
+  hideUnlockOverlay();
+  setupErrorEl.textContent = message || "";
+  setupOverlayEl.classList.add("show");
+  setupOverlayEl.setAttribute("aria-hidden", "false");
+  disableEditor(true);
+  refreshBtn.disabled = true;
+  newProjectBtn.disabled = true;
+  window.setTimeout(() => setupApiKeyEl.focus(), 50);
+}
+
+function hideSetupOverlay() {
+  setupErrorEl.textContent = "";
+  setupApiKeyEl.value = "";
+  setupPasswordEl.value = "";
+  setupPasswordConfirmEl.value = "";
+  setupOverlayEl.classList.remove("show");
+  setupOverlayEl.setAttribute("aria-hidden", "true");
   refreshBtn.disabled = false;
   newProjectBtn.disabled = false;
 }
@@ -895,16 +924,64 @@ function bindEvents() {
         throw new Error("Unlock failed");
       }
     } catch (e) {
-      unlockErrorEl.textContent = String(e.message || e);
+      const msg = String(e.message || e);
+      if (msg.includes("Missing OPENAI.API_KEY file")) {
+        showSetupOverlay("No `OPENAI.API_KEY` found. Create one below.");
+      } else {
+        unlockErrorEl.textContent = msg;
+      }
     } finally {
       unlockBtn.disabled = false;
       unlockPasswordEl.focus();
     }
   };
 
+  const doSetup = async () => {
+    setupErrorEl.textContent = "";
+    setupBtn.disabled = true;
+    try {
+      const apiKey = (setupApiKeyEl.value || "").trim();
+      const password = setupPasswordEl.value || "";
+      const confirm = setupPasswordConfirmEl.value || "";
+
+      if (!apiKey) throw new Error("API key required");
+      if (!password.trim()) throw new Error("Password required");
+      if (password !== confirm) throw new Error("Passwords do not match");
+
+      const data = await api("/api/auth/setup", {
+        method: "POST",
+        body: JSON.stringify({ api_key: apiKey, password, password_confirm: confirm }),
+      });
+      if (data && data.token) {
+        setToken(data.token);
+        hideSetupOverlay();
+        await refreshProjects({ keepSelection: true });
+        showToast("Unlocked");
+      } else {
+        throw new Error("Setup failed");
+      }
+    } catch (e) {
+      setupErrorEl.textContent = String(e.message || e);
+    } finally {
+      setupBtn.disabled = false;
+      setupApiKeyEl.focus();
+    }
+  };
+
   unlockBtn.addEventListener("click", () => doUnlock());
   unlockPasswordEl.addEventListener("keydown", (ev) => {
     if (ev.key === "Enter") doUnlock();
+  });
+
+  setupBtn.addEventListener("click", () => doSetup());
+  setupApiKeyEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") doSetup();
+  });
+  setupPasswordEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") doSetup();
+  });
+  setupPasswordConfirmEl.addEventListener("keydown", (ev) => {
+    if (ev.key === "Enter") doSetup();
   });
 }
 
@@ -931,12 +1008,23 @@ async function init() {
       if (tokenData && tokenData.token) {
         setToken(tokenData.token);
         hideUnlockOverlay();
+        hideSetupOverlay();
         await refreshProjects({ keepSelection: true });
         return;
       }
     }
   } catch {
     // fall through to unlock modal
+  }
+
+  try {
+    const status = await api("/api/auth/status");
+    if (status && status.has_key_file === false) {
+      showSetupOverlay("");
+      return;
+    }
+  } catch {
+    // ignore
   }
 
   showUnlockOverlay("");

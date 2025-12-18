@@ -22,6 +22,8 @@ This project expects an encrypted key file `OPENAI.API_KEY` (gitignored). Create
 python -c "from auditbatchtry.api_key_crypto import get_api_key; get_api_key()"
 ```
 
+If the file is missing, the browser GUI also offers a setup dialog to create it.
+
 The browser will ask for the password to decrypt the key (kept only in server memory).
 
 Optional alternatives:
