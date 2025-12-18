@@ -1,106 +1,67 @@
 # AuditBatchTry
 
----
+Batch-generate, merge, and format security audits using OpenAI models. Includes a local browser GUI to manage multiple projects.
 
-## Prerequisites
+## Requirements
 
-- **Python:** 3.9+ (3.10 or newer recommended)
-- **Git:** to clone and manage the repository
-- **OpenAI account & API key** (system will ask for the API key) 
+- Python 3.9+ (3.10+ recommended)
 
----
-
-## Quick Start
-
-Clone the repository:
+## Setup
 
 ```bash
-git clone https://github.com/PlanetMacro/AuditBatchTry.git
-cd AuditBatchTry
-````
-
-Install dependencies inside a virtual environment (see OS-specific instructions below), then:
-
-```bash
+python -m venv .venv
+source .venv/bin/activate
 pip install -r requirements.txt
 ```
----
 
-## OS-specific setup
+## API key (encrypted)
 
-### Linux (Debian/Ubuntu)
+This project expects an encrypted key file `OPENAI.API_KEY` (gitignored). Create it once:
 
-1. Ensure Python and venv tools are available:
+```bash
+python -c "from auditbatchtry.api_key_crypto import get_api_key; get_api_key()"
+```
 
-   ```bash
-   sudo apt update
-   sudo apt install -y python3 python3-venv python3-pip
-   ```
+The browser will ask for the password to decrypt the key (kept only in server memory).
 
-2. Create and activate a virtual environment:
+Optional alternatives:
+- Set `OPENAI_API_KEY` (plaintext) to skip the password prompt.
+- Set `OPENAI_API_KEY_PASSWORD` to auto-decrypt `OPENAI.API_KEY` on startup (no browser prompt).
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
+## Browser GUI
 
-3. Upgrade pip (recommended) and install deps:
+Start the local server:
 
-   ```bash
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+```bash
+python -m uvicorn auditbatchtry.server:app --host 127.0.0.1 --port 8000
+```
 
-4. Deactivate when done:
+Open `http://127.0.0.1:8000` in your browser.
 
-   ```bash
-   deactivate
-   ```
+- Backwards-compatible: `python -m uvicorn server:app --host 127.0.0.1 --port 8000`
+- Projects live under `data/projects/` by default.
+- Per-project settings and system prompts are editable in the UI and apply to the next run.
 
----
+## CLI (single-project flow)
 
-### macOS
+```bash
+python main.py
+```
 
-1. Verify Python 3 is available (via Xcode tools, Homebrew, or python.org). With Homebrew:
+- Prompt: `data/PUT_PROMPT_HERE.txt`
+- Output: `data/AUDIT_RESULT.txt`
+- Intermediate runs: `data/RUNS/`
+- Default model/settings: `auditbatchtry/config.py`
 
-   ```bash
-   brew install python
-   ```
+## Paths / env vars
 
-2. Create and activate a virtual environment:
+- `AUDIT_DATA_DIR` (default: `./data`)
+- `AUDIT_PROJECTS_DIR` (default: `$AUDIT_DATA_DIR/projects`)
+- `OPENAI_API_KEY_FILE` (default: `./OPENAI.API_KEY`)
+- `OPENAI_API_KEY` (plaintext key)
+- `OPENAI_API_KEY_PASSWORD` (decrypt automatically)
 
-   ```bash
-   python3 -m venv .venv
-   source .venv/bin/activate
-   ```
+## Notes
 
-3. Upgrade pip (recommended) and install deps:
-
-   ```bash
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
-
-4. Deactivate when done:
-
-   ```bash
-   deactivate
-   ```
-
----
-
-## Execution
-
-   ```bash
-   python3 main.py
-   ```
-
----
-
-## Use
-
-- Change parameters like LOG_NUMBER_OF_BATCHES in main.py
-- Put the audit code into PUT_PROMPT_HERE.txt
-- Read the result from AUDIT_RESULT.txt
-
-
+- On first run, legacy runtime artifacts in the repo root (`projects/`, `RUNS/`, `PUT_PROMPT_HERE.txt`, `AUDIT_RESULT.txt`) are migrated into `data/` when possible.
+- The server is intended for local use; do not expose it publicly without adding real authentication.

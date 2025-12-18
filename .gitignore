@@ -216,3 +216,12 @@ PUT_PROMPT_HERE.txt
 AUDIT_RESULT.txt
 
 RUNS/
+
+# GUI runtime state
+projects/
+
+# Runtime data (default location for projects, runs, prompt/results)
+data/
+
+# Legacy runtime folders (pre-refactor)
+/defaults/

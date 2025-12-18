@@ -442,6 +442,7 @@ def generate_runs(
     base_backoff_s: float = 1.0,
     runs_dir: str = RUNS_DIR,
     generation_tools: Optional[List[Dict[str, Any]]] = None,
+    system_prompt: str = SYSTEM_PROMPT,
     poll_interval_sec: float = 4.0,
 ) -> List[CompletionResult]:
     """
@@ -468,7 +469,7 @@ def generate_runs(
     for k in range(to_run_now):
         run_index = start_index + k
         comment = _random_string(5, 50)
-        final_prompt = f"{SYSTEM_PROMPT}\n\n' IGNORE THIS COMMENT: {comment}\n\n{prompt}"
+        final_prompt = f"{system_prompt}\n\n' IGNORE THIS COMMENT: {comment}\n\n{prompt}"
 
         payload: Dict[str, Any] = {
             "model": model,
@@ -621,11 +622,11 @@ def generate_runs(
 # Merging support (sync, via Responses API)
 # ====================================================
 
-def _build_merge_prompt(a: str, b: str) -> str:
+def _build_merge_prompt(a: str, b: str, merge_system_prompt: str = MERGE_SYSTEM_PROMPT) -> str:
     """Construct the deterministic merge instruction that takes two reports A and B."""
     comment = _random_string(5, 50)
     return (
-        f"{MERGE_SYSTEM_PROMPT}\n\n"
+        f"{merge_system_prompt}\n\n"
         f"' IGNORE THIS COMMENT: {comment}\n\n"
         "REPORT A:\n"
         f"{(a or '').strip()}\n\n"
@@ -643,10 +644,11 @@ def _merge_two(
     model: str,
     reasoning_effort: str,
     verbosity: str,
+    merge_system_prompt: str = MERGE_SYSTEM_PROMPT,
     poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """Merge two issue lists via the LLM, returning the deduplicated union."""
-    prompt = _build_merge_prompt(a, b)
+    prompt = _build_merge_prompt(a, b, merge_system_prompt=merge_system_prompt)
     payload: Dict[str, Any] = {
         "model": model,
         "input": [
@@ -676,6 +678,7 @@ def hierarchical_merge(
     model: str,
     reasoning_effort: str,
     verbosity: str,
+    merge_system_prompt: str = MERGE_SYSTEM_PROMPT,
     poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
@@ -735,7 +738,7 @@ def hierarchical_merge(
                 slot_index += 1
                 continue
 
-            prompt = _build_merge_prompt(a, b)
+            prompt = _build_merge_prompt(a, b, merge_system_prompt=merge_system_prompt)
             payload: Dict[str, Any] = {
                 "model": model,
                 "input": [
@@ -867,6 +870,7 @@ def merge_all_runs(
     verbosity: str = "medium",
     runs_dir: str = RUNS_DIR,
     write_merged_to: Optional[str] = os.path.join(RUNS_DIR, "merged.txt"),
+    merge_system_prompt: str = MERGE_SYSTEM_PROMPT,
     poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
@@ -891,6 +895,7 @@ def merge_all_runs(
         model=model,
         reasoning_effort=reasoning_effort,
         verbosity=verbosity,
+        merge_system_prompt=merge_system_prompt,
         poll_interval_sec=poll_interval_sec,
     )
 
@@ -1024,6 +1029,7 @@ def format_issues_incremental(
     runs_dir: str = RUNS_DIR,
     poll_interval_sec: float = 4.0,
     max_parallel_issues: int = 8,
+    issue_format_system_prompt: str = ISSUE_FORMAT_SYSTEM_PROMPT,
 ) -> CompletionResult:
     """
     Incremental, crash-resilient formatter.
@@ -1107,7 +1113,7 @@ def format_issues_incremental(
         for issue_number, block in chunk:
             comment = _random_string(5, 50)
             prompt = (
-                f"{ISSUE_FORMAT_SYSTEM_PROMPT}\n\n"
+                f"{issue_format_system_prompt}\n\n"
                 f"' IGNORE THIS COMMENT: {comment}\n\n"
                 "Merged issue list:\n"
                 f"{block.strip()}\n\n"
@@ -1272,6 +1278,7 @@ def format_issues(
     model: str,
     reasoning_effort: str = "high",
     verbosity: str = "high",
+    issue_format_system_prompt: str = ISSUE_FORMAT_SYSTEM_PROMPT,
     poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
@@ -1293,7 +1300,7 @@ def format_issues(
 
     comment = _random_string(5, 50)
     prompt = (
-        f"{ISSUE_FORMAT_SYSTEM_PROMPT}\n\n"
+        f"{issue_format_system_prompt}\n\n"
         f"' IGNORE THIS COMMENT: {comment}\n\n"
         "Merged issue list:\n"
         f"{merged_text.strip()}\n\n"
@@ -1322,4 +1329,3 @@ def format_issues(
     rt, ot, tt = _extract_usage(resp_json)
     print("[format] Issue formatting completed.")
     return CompletionResult(text=text, reasoning_tokens=rt, output_tokens=ot, total_tokens=tt)
-

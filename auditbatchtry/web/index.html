@@ -1,0 +1,266 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>AuditBatchTry</title>
+    <link rel="stylesheet" href="/static/app.css" />
+  </head>
+  <body>
+    <div class="shell">
+      <aside class="panel sidebar">
+        <div class="panel-header">
+          <div>
+            <div class="title">AuditBatchTry</div>
+            <div class="subtitle">Projects</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="refreshBtn" title="Refresh">Refresh</button>
+            <button class="btn primary" id="newProjectBtn" title="New project">New</button>
+          </div>
+        </div>
+        <div id="projectList" class="project-list" aria-label="Project list"></div>
+      </aside>
+
+      <main class="panel center" aria-label="Project details">
+        <div class="panel-header">
+          <div class="center-header">
+            <div class="header-stack">
+              <input
+                id="projectName"
+                class="input name-input"
+                placeholder="Project name"
+                autocomplete="off"
+              />
+              <div id="projectSummary" class="hint">—</div>
+            </div>
+            <div id="statusPill" class="pill" title="Status">—</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="settingsBtn">Settings</button>
+            <button class="btn" id="promptsBtn">Prompts</button>
+            <button class="btn" id="saveBtn">Save</button>
+            <button class="btn primary" id="runBtn">Run</button>
+          </div>
+        </div>
+
+        <div class="split">
+          <section class="pane">
+            <div class="pane-header">
+              <div class="pane-title">Prompt</div>
+              <div class="pane-actions">
+                <button class="btn small" id="copyPromptBtn">Copy</button>
+              </div>
+            </div>
+            <textarea
+              id="promptText"
+              class="textarea"
+              spellcheck="false"
+              placeholder="Paste your audit prompt here…"
+            ></textarea>
+          </section>
+
+          <section class="pane">
+            <div class="pane-header">
+              <div class="pane-title">Audit Result</div>
+              <div class="pane-actions">
+                <button class="btn small" id="copyResultBtn">Copy</button>
+              </div>
+            </div>
+            <textarea
+              id="resultText"
+              class="textarea"
+              spellcheck="false"
+              readonly
+              placeholder="Run the audit to generate results."
+            ></textarea>
+          </section>
+        </div>
+      </main>
+
+      <section class="panel bottom" aria-label="Terminal output">
+        <div class="panel-header">
+          <div>
+            <div class="subtitle">Terminal</div>
+            <div class="hint">Live progress output for the selected project</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="clearLogViewBtn">Clear View</button>
+          </div>
+        </div>
+        <pre id="logOutput" class="log-output"></pre>
+      </section>
+    </div>
+
+    <div id="unlockOverlay" class="overlay" aria-label="Unlock" aria-hidden="true">
+      <div class="modal panel">
+        <div class="panel-header">
+          <div>
+            <div class="title">Unlock API Key</div>
+            <div class="hint">Enter the password to decrypt `OPENAI.API_KEY`</div>
+          </div>
+        </div>
+        <div class="modal-body">
+          <label class="field">
+            <div class="field-label">Password</div>
+            <input id="unlockPassword" class="input" type="password" autocomplete="current-password" />
+          </label>
+          <div class="modal-actions">
+            <button class="btn primary" id="unlockBtn">Unlock</button>
+          </div>
+          <div id="unlockError" class="modal-error" role="alert"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="settingsOverlay" class="overlay" aria-label="Settings" aria-hidden="true">
+      <div class="modal panel">
+        <div class="panel-header">
+          <div>
+            <div class="title">Project Settings</div>
+            <div class="hint">Applies to the next run</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="closeSettingsBtn">Close</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="grid2">
+            <label class="field">
+              <div class="field-label">LOG_NUMBER_OF_BATCHES</div>
+              <input id="cfgLogBatches" class="input" type="number" min="0" max="12" step="1" />
+              <div id="cfgParallelRunsHint" class="hint">Parallel runs: —</div>
+            </label>
+
+            <label class="field">
+              <div class="field-label">FORMAT_MAX_PARALLEL_ISSUES</div>
+              <input id="cfgFormatParallel" class="input" type="number" min="1" max="64" step="1" />
+              <div class="hint">Parallel issue formatting</div>
+            </label>
+          </div>
+
+          <div class="divider"></div>
+
+          <div class="grid3">
+            <div class="group-title">Generation</div>
+            <label class="field">
+              <div class="field-label">MODEL</div>
+              <input id="cfgModel" class="input" type="text" />
+            </label>
+            <label class="field">
+              <div class="field-label">REASONING_EFFORT</div>
+              <select id="cfgReasoning" class="input">
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label class="field">
+              <div class="field-label">VERBOSITY</div>
+              <select id="cfgVerbosity" class="input">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid3">
+            <div class="group-title">Merge</div>
+            <label class="field">
+              <div class="field-label">MERGE_MODEL</div>
+              <input id="cfgMergeModel" class="input" type="text" />
+            </label>
+            <label class="field">
+              <div class="field-label">MERGE_REASONING_EFFORT</div>
+              <select id="cfgMergeReasoning" class="input">
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label class="field">
+              <div class="field-label">MERGE_VERBOSITY</div>
+              <select id="cfgMergeVerbosity" class="input">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="grid3">
+            <div class="group-title">Format</div>
+            <label class="field">
+              <div class="field-label">FORMAT_MODEL</div>
+              <input id="cfgFormatModel" class="input" type="text" />
+            </label>
+            <label class="field">
+              <div class="field-label">FORMAT_REASONING_EFFORT</div>
+              <select id="cfgFormatReasoning" class="input">
+                <option value="minimal">minimal</option>
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+            <label class="field">
+              <div class="field-label">FORMAT_VERBOSITY</div>
+              <select id="cfgFormatVerbosity" class="input">
+                <option value="low">low</option>
+                <option value="medium">medium</option>
+                <option value="high">high</option>
+              </select>
+            </label>
+          </div>
+
+          <div class="modal-actions">
+            <button class="btn" id="restoreConfigDefaultsBtn">Restore Defaults</button>
+            <button class="btn primary" id="saveSettingsBtn">Save Settings</button>
+          </div>
+          <div id="settingsError" class="modal-error" role="alert"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="promptsOverlay" class="overlay" aria-label="System Prompts" aria-hidden="true">
+      <div class="modal panel">
+        <div class="panel-header">
+          <div>
+            <div class="title">System Prompts</div>
+            <div class="hint">Edits apply to the next run</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="closePromptsBtn">Close</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <label class="field">
+            <div class="field-label">Generation System Prompt</div>
+            <textarea id="sysPromptGeneration" class="textarea small" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <div class="field-label">Merge System Prompt</div>
+            <textarea id="sysPromptMerge" class="textarea small" spellcheck="false"></textarea>
+          </label>
+          <label class="field">
+            <div class="field-label">Format System Prompt</div>
+            <textarea id="sysPromptFormat" class="textarea small" spellcheck="false"></textarea>
+          </label>
+
+          <div class="modal-actions">
+            <button class="btn" id="restorePromptDefaultsBtn">Restore Defaults</button>
+            <button class="btn primary" id="savePromptsBtn">Save Prompts</button>
+          </div>
+          <div id="promptsError" class="modal-error" role="alert"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="toast" class="toast" role="status" aria-live="polite"></div>
+
+    <script src="/static/app.js"></script>
+  </body>
+</html>
