@@ -19,7 +19,7 @@ pip install -r requirements.txt
 This project expects an encrypted key file `OPENAI.API_KEY` (gitignored). Create it once:
 
 ```bash
-python -c "from auditbatchtry.api_key_crypto import get_api_key; get_api_key()"
+python -c "from laauditbot.api_key_crypto import get_api_key; get_api_key()"
 ```
 
 If the file is missing, the browser GUI also offers a setup dialog to create it.
@@ -35,7 +35,7 @@ Optional alternatives:
 Start the local server:
 
 ```bash
-python -m uvicorn auditbatchtry.server:app --host 127.0.0.1 --port 8000
+python -m uvicorn laauditbot.server:app --host 127.0.0.1 --port 8000
 ```
 
 Open `http://127.0.0.1:8000` in your browser.
@@ -44,16 +44,13 @@ Open `http://127.0.0.1:8000` in your browser.
 - Projects live under `data/projects/` by default.
 - Per-project settings and system prompts are editable in the UI and apply to the next run.
 
-## CLI (single-project flow)
+## Convenience
 
 ```bash
 python main.py
 ```
 
-- Prompt: `data/PUT_PROMPT_HERE.txt`
-- Output: `data/AUDIT_RESULT.txt`
-- Intermediate runs: `data/RUNS/`
-- Default model/settings: `auditbatchtry/config.py`
+Starts the local GUI server (defaults to `127.0.0.1:8000`).
 
 ## Paths / env vars
 
@@ -65,5 +62,5 @@ python main.py
 
 ## Notes
 
-- On first run, legacy runtime artifacts in the repo root (`projects/`, `RUNS/`, `PUT_PROMPT_HERE.txt`, `AUDIT_RESULT.txt`) are migrated into `data/` when possible.
+- On first run, a legacy `projects/` folder (if present) is migrated into `data/projects/`.
 - The server is intended for local use; do not expose it publicly without adding real authentication.

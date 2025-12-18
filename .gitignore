@@ -209,19 +209,8 @@ __marimo__/
 # OpenAI API key file
 OPENAI.API_KEY
 
-# Promt files
-PUT_PROMPT_HERE.txt
-
-# Promt files
-AUDIT_RESULT.txt
-
-RUNS/
-
 # GUI runtime state
 projects/
 
 # Runtime data (default location for projects, runs, prompt/results)
 data/
-
-# Legacy runtime folders (pre-refactor)
-/defaults/

@@ -14,9 +14,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Optional
 
-from auditbatchtry import config as audit_config
-from auditbatchtry import openai_client as oc
-from auditbatchtry.api_key_crypto import blob_to_json, decrypt_api_key, encrypt_api_key, json_to_blob
+from laauditbot import config as audit_config
+from laauditbot import openai_client as oc
+from laauditbot.api_key_crypto import blob_to_json, decrypt_api_key, encrypt_api_key, json_to_blob
 from cryptography.exceptions import InvalidTag
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -128,25 +128,6 @@ def _append_log_line(log_path: Path, text: str) -> None:
         if not text.endswith("\n"):
             f.write("\n")
         f.flush()
-
-
-def _maybe_migrate_legacy_runtime_files() -> None:
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-
-    legacy_prompt = REPO_ROOT / "PUT_PROMPT_HERE.txt"
-    legacy_output = REPO_ROOT / "AUDIT_RESULT.txt"
-    legacy_runs = REPO_ROOT / "RUNS"
-
-    data_prompt = DATA_DIR / "PUT_PROMPT_HERE.txt"
-    data_output = DATA_DIR / "AUDIT_RESULT.txt"
-    data_runs = DATA_DIR / "RUNS"
-
-    if legacy_prompt.exists() and not data_prompt.exists():
-        shutil.move(str(legacy_prompt), str(data_prompt))
-    if legacy_output.exists() and not data_output.exists():
-        shutil.move(str(legacy_output), str(data_output))
-    if legacy_runs.is_dir() and not data_runs.exists():
-        shutil.move(str(legacy_runs), str(data_runs))
 
 
 def _maybe_migrate_legacy_projects_dir() -> None:
@@ -342,38 +323,11 @@ def _ensure_seed_project() -> None:
     if _list_projects():
         return
 
-    prompt_candidates = [
-        DATA_DIR / "PUT_PROMPT_HERE.txt",
-        REPO_ROOT / "PUT_PROMPT_HERE.txt",
-        REPO_ROOT / "PUT_PROMT_HERE.txt",
-        REPO_ROOT / "PUT_PROMPT_HERE",
-        REPO_ROOT / "PUT_PROMT_HERE",
-    ]
-    result_candidates = [
-        DATA_DIR / "AUDIT_RESULT.txt",
-        REPO_ROOT / "AUDIT_RESULT.txt",
-        REPO_ROOT / "AUDIT_RESULTS.txt",
-        REPO_ROOT / "AUDIT_RESULTS",
-    ]
-
-    prompt = ""
-    for p in prompt_candidates:
-        if p.exists():
-            prompt = _read_text(p).rstrip()
-            break
-
-    result = ""
-    for r in result_candidates:
-        if r.exists():
-            result = _read_text(r).rstrip()
-            break
-
-    meta = _create_project(name="Default Project", prompt=prompt)
+    meta = _create_project(name="Default Project", prompt="")
     paths = _project_paths(meta["id"])
-    _atomic_write_text(paths["result"], result + "\n" if result else "")
     _append_log_line(
         paths["logs"],
-        f"[seed] Created default project {meta['id']} from legacy files at {_now_iso()}",
+        f"[seed] Created default project {meta['id']} at {_now_iso()}",
     )
 
 
@@ -749,7 +703,6 @@ if STATIC_DIR.exists():
 @app.on_event("startup")
 def _startup() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
-    _maybe_migrate_legacy_runtime_files()
     _maybe_migrate_legacy_projects_dir()
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
     _ensure_seed_project()
