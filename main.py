@@ -16,7 +16,7 @@ REASONING_EFFORT = "high"          # minimal | low | medium | high
 VERBOSITY = "high"                 # low | medium | high
 
 # Merge config (can be cheaper / less effort)
-MERGE_MODEL = "gpt-5"              # or just MODEL if you prefer
+MERGE_MODEL = "gpt-5.1"              # or just MODEL if you prefer
 MERGE_REASONING_EFFORT = "medium"  # merges are usually easier
 MERGE_VERBOSITY = "high"           # often enough for merged output
 
