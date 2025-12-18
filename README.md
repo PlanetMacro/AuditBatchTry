@@ -1,4 +1,4 @@
-# AuditBatchTry
+# LAAuditBot
 
 Batch-generate, merge, and format security audits using OpenAI models. Includes a local browser GUI to manage multiple projects.
 

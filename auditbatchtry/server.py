@@ -720,7 +720,7 @@ def _sse_data_line(line: str) -> str:
     return f"data: {safe}\n\n"
 
 
-app = FastAPI(title="AuditBatchTry GUI", version="0.1.0")
+app = FastAPI(title="LAAuditBot GUI", version="0.1.0")
 
 if STATIC_DIR.exists():
     app.mount("/static", StaticFiles(directory=str(STATIC_DIR)), name="static")
