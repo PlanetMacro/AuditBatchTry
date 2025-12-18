@@ -10,101 +10,11 @@ from dataclasses import dataclass
 from typing import List, Tuple, Optional, Dict, Any
 
 import requests
+from laauditbot.system_prompts import load_system_prompt
 
-# ----------------------
-# System prompt used for the *generation* step (kept as-is)
-# ----------------------
-SYSTEM_PROMPT = (
-    "- You are a senior software security researcher analyzing code for software security issues.\n"
-    "- You analyze the given problem from multiple angles.\n"
-    "Rules:\n"
-    "- Issues MUST have the exact following format: Issue: <NUMBER> <LINEBREAK> Location: <COPY_OF_LINE> <LINEBREAK> Description: <TEXT>\n"
-    "- If you can not open given links to the codebase or provided context, you MUST include a notification and abort."
-    "- if the provided information is not enough to reason about a potential security issue, you should TRY to gather the information online."
-    " if you can not access the required information online, you MUST add a list including the missing information in the Issue's description.\n"
-    "- Output ONLY the formatted issues, exactly in the structure above, with a single blank line "
-    " between issues and no leading or trailing commentary.\n"
-    "- Do NOT invent issues that are not clearly implied by the input.\n"
-    "- Do NOT include any meta-explanations about this template or your reasoning process.\n"
-    "- You MUST include the location as a correctly formatted link to the exact line of code in the codebase where the issue occurs.\n"
-)
-
-# ----------------------
-# System prompt used for the *merging* step
-# ----------------------
-MERGE_SYSTEM_PROMPT = (
-    "You are an assistant that merges two audit reports of issues into a single deduplicated list.\n"
-    "Output MUST contain only issues in exactly this format:\n"
-    "Issue: <NUMBER>\nLocation: <COPY_OF_LINE>\nDescription: <TEXT>\n"
-    "Rules:\n"
-    " - Compute the semantic set UNION of issues from both reports.\n"
-    " - Treat two issues as duplicates if they refer to the same underlying problem OR the same Location (case/whitespace-insensitive), even with wording differences.\n"
-    " - When merging duplicates, combine the ideas from both issues, but make sure to not repeat content\n" 
-    " - When merged issues have different locations, list both\n"
-    " - Renumber issues consecutively starting from 1 in the final output.\n"
-    " - Place a single blank line between issues. Do NOT add any commentary, headings, code fences, or extra text before/after the list."
-)
-
-# ----------------------
-# System prompt used for the *final formatting / triage* step
-# ----------------------
-ISSUE_FORMAT_SYSTEM_PROMPT = (
-    "You are a senior software security researcher. You receive a merged flat list of potential issues, "
-    "each in the format:\n"
-    "  Issue: <NUMBER>\n"
-    "  Location: <COPY_OF_LINE>\n"
-    "  Description: <TEXT>\n\n"
-    "Your task:\n"
-    "  1. Open the link and double check the issue in the provided code behind the link. If the link"
-    " does not work, TRY to recover it, if this fails, you MUST RETURN an ERROR and ABORT.\n"
-    "  2. Decide for each issue whether it describes an attackable security vulnerability or "
-    "     realistic abuse scenario.\n"
-    "  3. If an issue is not attackable (e.g., pure style, documentation quality, performance micro-"
-    "     optimization, extremely theoretical, or already fully mitigated), DROP IT entirely.\n"
-    "  4. For each remaining issue, rewrite it into the following final format:\n\n"
-    "Final output format (repeat this whole block for each remaining issue, with a single blank "
-    "line between issues and no extra text):\n"
-    "Issue <NUMBER>: <DESCRIPTIVE HEADLINE>\n"
-    "Location\n"
-    "<A link or description of the location in the code / documentation where the issue exists>\n"
-    "Synopsis\n"
-    "<A concise description of the essential vulnerability, without assuming other components "
-    " mitigate it unless clearly stated in the input>\n"
-    "Impact\n"
-    "<Low | Medium | High>\n"
-    "<1–3 sentences describing what benefit an attacker gains by successfully exploiting the "
-    " vulnerability, stated conservatively and without overestimating real-world impact>\n"
-    "Feasibility\n"
-    "<Low | Medium | High>\n"
-    "<1–3 sentences estimating how difficult it is to perform the attack in practice, assuming "
-    " the preconditions are met>\n"
-    "Severity\n"
-    "<Low | Medium | High | Critical>\n"
-    "<1–3 sentences justifying this severity based on combining impact and feasibility, following "
-    " an OWASP-style risk severity matrix>\n"
-    "Preconditions\n"
-    "<Conditions necessary for the vulnerability to be exploitable (configuration, roles, data, etc.)>\n"
-    "Technical Details\n"
-    "<Implementation details and a specific process an attacker would use to leverage the issue, "
-    " referring to the Location where useful>\n"
-    "Mitigation\n"
-    "<Immediate steps current users or operators may take to protect themselves>\n"
-    "Remediation\n"
-    "<Development and architectural changes that will prevent, detect, or otherwise mitigate the "
-    " vulnerability in future releases>\n\n"
-    "Rules:\n"
-    "- Output ONLY the formatted issues, exactly in the structure above, with a single blank line "
-    " between issues and no leading or trailing commentary."
-    "  DO keep the text as short as possible.\n"
-    "  DO use flowing text (except for location, which should be a list).\n\n"
-    "  DO NOT repeat content inside a single issue\n"
-    "- Do NOT invent issues that are not clearly implied by the input.\n"
-    "- Do NOT output non-attackable issues.\n"
-    "- Do NOT output issues that have negligible success probabilities.\n"
-    "- Do NOT output issues that are only relevant for system changes/updates.\n"
-    "  DO NOT use tables, bullet points, lists ect\n"
-    "- Do NOT include any meta-explanations about this template or your reasoning process.\n"
-)
+SYSTEM_PROMPT = load_system_prompt("generation")
+MERGE_SYSTEM_PROMPT = load_system_prompt("merge")
+ISSUE_FORMAT_SYSTEM_PROMPT = load_system_prompt("format")
 
 
 # ====================================================

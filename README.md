@@ -43,6 +43,7 @@ Open `http://127.0.0.1:8000` in your browser.
 - Backwards-compatible: `python -m uvicorn server:app --host 127.0.0.1 --port 8000`
 - Projects live under `data/projects/` by default.
 - Per-project settings and system prompts are editable in the UI and apply to the next run.
+- Default system prompts live in `laauditbot/system_prompts/`.
 
 ## Convenience
 

@@ -17,6 +17,7 @@ from typing import Any, Optional
 from laauditbot import config as audit_config
 from laauditbot import openai_client as oc
 from laauditbot.api_key_crypto import blob_to_json, decrypt_api_key, encrypt_api_key, json_to_blob
+from laauditbot.system_prompts import load_default_system_prompts as _load_default_system_prompts_from_files
 from cryptography.exceptions import InvalidTag
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, PlainTextResponse, StreamingResponse
@@ -33,8 +34,6 @@ PROJECTS_DIR = Path(os.environ.get("AUDIT_PROJECTS_DIR", str(DATA_DIR / "project
 
 KEY_FILE = Path(os.environ.get("OPENAI_API_KEY_FILE", str(REPO_ROOT / "OPENAI.API_KEY")))
 
-DEFAULTS_DIR = PKG_DIR / "defaults"
-DEFAULT_SYSTEM_PROMPTS_PATH = DEFAULTS_DIR / "system_prompts.json"
 WEB_DIR = PKG_DIR / "web"
 STATIC_DIR = WEB_DIR / "static"
 
@@ -474,14 +473,6 @@ def _config_to_run_config(cfg: dict[str, Any]) -> RunConfig:
     )
 
 
-def _default_system_prompts_from_code() -> dict[str, str]:
-    return {
-        "generation": oc.SYSTEM_PROMPT,
-        "merge": oc.MERGE_SYSTEM_PROMPT,
-        "format": oc.ISSUE_FORMAT_SYSTEM_PROMPT,
-    }
-
-
 def _normalize_system_prompts(data: dict[str, Any], defaults: dict[str, str]) -> dict[str, str]:
     out = {**defaults, **(data or {})}
     for k in ("generation", "merge", "format"):
@@ -490,11 +481,7 @@ def _normalize_system_prompts(data: dict[str, Any], defaults: dict[str, str]) ->
 
 
 def _load_default_system_prompts() -> dict[str, str]:
-    defaults = _default_system_prompts_from_code()
-    if DEFAULT_SYSTEM_PROMPTS_PATH.exists():
-        data = _load_json(DEFAULT_SYSTEM_PROMPTS_PATH)
-        return _normalize_system_prompts(data, defaults)
-    return defaults
+    return _load_default_system_prompts_from_files()
 
 
 def _load_or_init_project_system_prompts(project_id: str) -> dict[str, str]:
