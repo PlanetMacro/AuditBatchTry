@@ -312,6 +312,13 @@ function renderProjectList() {
     dot.className = dotClass(p.status);
     dot.title = statusLabel(p.status);
 
+    const renameBtn = document.createElement("button");
+    renameBtn.type = "button";
+    renameBtn.className = "icon-btn";
+    renameBtn.title = "Rename project";
+    renameBtn.textContent = "✎";
+    renameBtn.disabled = state.busy || p.status === "running";
+
     const delBtn = document.createElement("button");
     delBtn.type = "button";
     delBtn.className = "icon-btn danger";
@@ -321,6 +328,7 @@ function renderProjectList() {
 
     selectBtn.appendChild(left);
     side.appendChild(dot);
+    side.appendChild(renameBtn);
     side.appendChild(delBtn);
     row.appendChild(selectBtn);
     row.appendChild(side);
@@ -332,6 +340,10 @@ function renderProjectList() {
 
     delBtn.addEventListener("click", async () => {
       await deleteProject(p);
+    });
+
+    renameBtn.addEventListener("click", async () => {
+      await renameProject(p);
     });
 
     projectListEl.appendChild(row);
@@ -554,6 +566,38 @@ async function deleteProject(project) {
     }
     await refreshProjects({ keepSelection: true });
     showToast("Deleted");
+  } catch (e) {
+    showToast(String(e.message || e));
+  }
+}
+
+async function renameProject(project) {
+  if (state.busy) {
+    showToast("Busy: wait for current run to finish");
+    return;
+  }
+  if (!project?.id) return;
+  const currentName = String(project.name || "").trim();
+  const label = currentName || project.id;
+  const next = window.prompt(`Rename project "${label}" to:`, currentName);
+  if (next === null) return;
+  const newName = next.trim();
+  if (!newName) {
+    showToast("Project name cannot be empty");
+    return;
+  }
+
+  try {
+    const updated = await api(`/api/projects/${encodeURIComponent(project.id)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name: newName }),
+    });
+    if (project.id === state.selectedId) {
+      if (state.currentProject) state.currentProject.name = updated?.name || newName;
+      projectNameEl.value = updated?.name || newName;
+    }
+    await refreshProjects({ keepSelection: true, silent: true });
+    showToast("Renamed");
   } catch (e) {
     showToast(String(e.message || e));
   }
