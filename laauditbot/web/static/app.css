@@ -511,6 +511,36 @@ body {
   transform: translateX(-50%) translateY(-6px);
 }
 
+.popover {
+  position: fixed;
+  z-index: 60;
+  width: min(520px, calc(100vw - 28px));
+  max-height: min(420px, calc(100vh - 28px));
+  display: none;
+}
+
+.popover.show {
+  display: flex;
+  flex-direction: column;
+}
+
+.popover-body {
+  padding: 14px;
+  overflow: auto;
+}
+
+.help-steps {
+  margin: 0;
+  padding-left: 18px;
+  color: var(--muted0);
+  font-size: 12px;
+  line-height: 1.5;
+}
+
+.help-steps li + li {
+  margin-top: 8px;
+}
+
 .overlay {
   position: fixed;
   inset: 0;

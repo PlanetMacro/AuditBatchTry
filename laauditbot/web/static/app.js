@@ -9,6 +9,7 @@ const statusPillEl = document.getElementById("statusPill");
 const settingsBtn = document.getElementById("settingsBtn");
 const promptsBtn = document.getElementById("promptsBtn");
 const auditPromptsBtn = document.getElementById("auditPromptsBtn");
+const helpBtn = document.getElementById("helpBtn");
 const saveBtn = document.getElementById("saveBtn");
 const runBtn = document.getElementById("runBtn");
 const promptEl = document.getElementById("promptText");
@@ -67,6 +68,9 @@ const deleteAuditPromptBtn = document.getElementById("deleteAuditPromptBtn");
 const saveAuditPromptBtn = document.getElementById("saveAuditPromptBtn");
 const auditPromptsErrorEl = document.getElementById("auditPromptsError");
 
+const helpPopoverEl = document.getElementById("helpPopover");
+const closeHelpBtn = document.getElementById("closeHelpBtn");
+
 const state = {
   projects: [],
   selectedId: null,
@@ -78,6 +82,7 @@ const state = {
   currentProject: null,
   auditPrompts: [],
   activeAuditPromptId: null,
+  helpPinned: false,
 };
 
 function sleep(ms) {
@@ -758,6 +763,46 @@ function hideOverlay(el) {
   el.setAttribute("aria-hidden", "true");
 }
 
+function positionPopover(anchorEl, popoverEl) {
+  const rect = anchorEl.getBoundingClientRect();
+
+  popoverEl.style.left = "0px";
+  popoverEl.style.top = "0px";
+
+  // Ensure dimensions are known for clamp logic.
+  popoverEl.classList.add("show");
+
+  const popRect = popoverEl.getBoundingClientRect();
+  const margin = 10;
+  const vw = window.innerWidth;
+  const vh = window.innerHeight;
+
+  let left = rect.right - popRect.width;
+  let top = rect.bottom + 10;
+
+  left = Math.max(margin, Math.min(left, vw - popRect.width - margin));
+  if (top + popRect.height > vh - margin) {
+    top = rect.top - popRect.height - 10;
+  }
+  top = Math.max(margin, Math.min(top, vh - popRect.height - margin));
+
+  popoverEl.style.left = `${left}px`;
+  popoverEl.style.top = `${top}px`;
+}
+
+function showHelpPopover({ pinned = false } = {}) {
+  state.helpPinned = Boolean(pinned);
+  helpPopoverEl.classList.add("show");
+  helpPopoverEl.setAttribute("aria-hidden", "false");
+  positionPopover(helpBtn, helpPopoverEl);
+}
+
+function hideHelpPopover({ force = false } = {}) {
+  if (!force && state.helpPinned) return;
+  helpPopoverEl.classList.remove("show");
+  helpPopoverEl.setAttribute("aria-hidden", "true");
+}
+
 function updateParallelRunsHint() {
   const logn = Number(cfgLogBatchesEl.value || 0);
   const n = Math.pow(2, Math.max(0, Math.min(12, logn)));
@@ -1167,6 +1212,23 @@ function bindEvents() {
   settingsBtn.addEventListener("click", () => openSettings());
   promptsBtn.addEventListener("click", () => openPrompts());
   auditPromptsBtn.addEventListener("click", () => openAuditPrompts());
+  helpBtn.addEventListener("mouseenter", () => {
+    if (!state.helpPinned) showHelpPopover({ pinned: false });
+  });
+  helpBtn.addEventListener("mouseleave", () => {
+    window.clearTimeout(hideHelpPopover._t);
+    hideHelpPopover._t = window.setTimeout(() => hideHelpPopover(), 140);
+  });
+  helpBtn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    const next = !state.helpPinned;
+    if (next) showHelpPopover({ pinned: true });
+    else {
+      state.helpPinned = false;
+      hideHelpPopover({ force: true });
+    }
+  });
 
   projectNameEl.addEventListener("input", () => (state.dirty = true));
   promptEl.addEventListener("input", () => (state.dirty = true));
@@ -1234,6 +1296,41 @@ function bindEvents() {
     await deleteAuditPrompt(p);
   });
   useAuditPromptBtn.addEventListener("click", () => useActiveAuditPromptForProject());
+
+  helpPopoverEl.addEventListener("mouseenter", () => {
+    window.clearTimeout(hideHelpPopover._t);
+  });
+  helpPopoverEl.addEventListener("mouseleave", () => {
+    window.clearTimeout(hideHelpPopover._t);
+    hideHelpPopover._t = window.setTimeout(() => hideHelpPopover(), 140);
+  });
+  closeHelpBtn.addEventListener("click", (ev) => {
+    ev.preventDefault();
+    ev.stopPropagation();
+    state.helpPinned = false;
+    hideHelpPopover({ force: true });
+  });
+
+  document.addEventListener("click", (ev) => {
+    if (!helpPopoverEl.classList.contains("show")) return;
+    const t = ev.target;
+    if (t === helpBtn || helpBtn.contains(t)) return;
+    if (helpPopoverEl.contains(t)) return;
+    state.helpPinned = false;
+    hideHelpPopover({ force: true });
+  });
+
+  window.addEventListener("resize", () => {
+    if (!helpPopoverEl.classList.contains("show")) return;
+    positionPopover(helpBtn, helpPopoverEl);
+  });
+
+  document.addEventListener("keydown", (ev) => {
+    if (ev.key === "Escape" && helpPopoverEl.classList.contains("show")) {
+      state.helpPinned = false;
+      hideHelpPopover({ force: true });
+    }
+  });
 
   const doUnlock = async () => {
     unlockErrorEl.textContent = "";

@@ -37,6 +37,7 @@
             <div id="statusPill" class="pill" title="Status">—</div>
           </div>
           <div class="panel-actions">
+            <button class="icon-btn" id="helpBtn" title="Help">?</button>
             <button class="btn" id="settingsBtn">Settings</button>
             <button class="btn small" id="promptsBtn">System Prompts</button>
             <button class="btn small" id="auditPromptsBtn">Audit Prompts</button>
@@ -342,6 +343,26 @@
             </section>
           </div>
         </div>
+      </div>
+    </div>
+
+    <div id="helpPopover" class="popover panel" aria-label="Help" aria-hidden="true">
+      <div class="panel-header">
+        <div>
+          <div class="subtitle">Help</div>
+          <div class="hint">Quick usage guide</div>
+        </div>
+        <div class="panel-actions">
+          <button class="icon-btn" id="closeHelpBtn" title="Close">×</button>
+        </div>
+      </div>
+      <div class="popover-body">
+        <ol class="help-steps">
+          <li>Paste the code to audit into the <strong>Code</strong> pane.</li>
+          <li>Open <strong>Settings</strong> to configure runs, models, and parallelism.</li>
+          <li>Open <strong>Audit Prompts</strong> to choose or create a template for this audit.</li>
+          <li>Press <strong>Run</strong> and wait for the audit to finish.</li>
+        </ol>
       </div>
     </div>
 
