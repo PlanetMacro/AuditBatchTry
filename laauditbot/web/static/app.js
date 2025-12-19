@@ -8,6 +8,7 @@ const projectSummaryEl = document.getElementById("projectSummary");
 const statusPillEl = document.getElementById("statusPill");
 const settingsBtn = document.getElementById("settingsBtn");
 const promptsBtn = document.getElementById("promptsBtn");
+const auditPromptsBtn = document.getElementById("auditPromptsBtn");
 const saveBtn = document.getElementById("saveBtn");
 const runBtn = document.getElementById("runBtn");
 const promptEl = document.getElementById("promptText");
@@ -55,6 +56,17 @@ const sysPromptGenerationEl = document.getElementById("sysPromptGeneration");
 const sysPromptMergeEl = document.getElementById("sysPromptMerge");
 const sysPromptFormatEl = document.getElementById("sysPromptFormat");
 
+const auditPromptsOverlayEl = document.getElementById("auditPromptsOverlay");
+const closeAuditPromptsBtn = document.getElementById("closeAuditPromptsBtn");
+const newAuditPromptBtn = document.getElementById("newAuditPromptBtn");
+const auditPromptListEl = document.getElementById("auditPromptList");
+const auditPromptNameEl = document.getElementById("auditPromptName");
+const auditPromptTextEl = document.getElementById("auditPromptText");
+const useAuditPromptBtn = document.getElementById("useAuditPromptBtn");
+const deleteAuditPromptBtn = document.getElementById("deleteAuditPromptBtn");
+const saveAuditPromptBtn = document.getElementById("saveAuditPromptBtn");
+const auditPromptsErrorEl = document.getElementById("auditPromptsError");
+
 const state = {
   projects: [],
   selectedId: null,
@@ -64,6 +76,8 @@ const state = {
   token: null,
   busy: false,
   currentProject: null,
+  auditPrompts: [],
+  activeAuditPromptId: null,
 };
 
 function sleep(ms) {
@@ -206,8 +220,11 @@ function setBusy(isBusy) {
 function setStatusPill(status, phase, locked, errorText) {
   statusPillEl.classList.remove("running", "success", "error");
   const phaseText = phaseLabel(phase);
-  statusPillEl.textContent =
-    status === "running" && phaseText ? `Running · ${phaseText}` : statusLabel(status);
+  if (status === "running") {
+    statusPillEl.textContent = phaseText || statusLabel(status);
+  } else {
+    statusPillEl.textContent = statusLabel(status);
+  }
 
   if (status === "running") statusPillEl.classList.add("running");
   if (status === "success") statusPillEl.classList.add("success");
@@ -242,7 +259,7 @@ function setStatusPill(status, phase, locked, errorText) {
 
 function dotClass(status) {
   if (status === "running") return "dot running";
-  if (status === "success") return "dot success";
+  if (status === "success") return "done-check";
   if (status === "error") return "dot error";
   return "dot";
 }
@@ -300,10 +317,15 @@ function renderProjectList() {
     meta1.textContent = buildProjectSummary(p);
     const meta2 = document.createElement("div");
     meta2.className = "project-meta";
-    meta2.textContent = p.updated_at ? `Updated ${p.updated_at}` : "—";
+    const auditPromptName = (p.audit_prompt_used_name || "").trim();
+    const meta2Text =
+      p.locked && p.status !== "running" && auditPromptName ? `Audit: ${auditPromptName}` : "";
+    if (meta2Text) {
+      meta2.textContent = meta2Text;
+    }
     left.appendChild(name);
     left.appendChild(meta1);
-    left.appendChild(meta2);
+    if (meta2Text) left.appendChild(meta2);
 
     const side = document.createElement("div");
     side.className = "project-side";
@@ -311,6 +333,7 @@ function renderProjectList() {
     const dot = document.createElement("div");
     dot.className = dotClass(p.status);
     dot.title = statusLabel(p.status);
+    dot.textContent = p.status === "success" ? "✓" : "";
 
     const renameBtn = document.createElement("button");
     renameBtn.type = "button";
@@ -355,6 +378,7 @@ function disableEditor(disabled) {
   promptEl.disabled = disabled;
   settingsBtn.disabled = disabled;
   promptsBtn.disabled = disabled;
+  auditPromptsBtn.disabled = disabled;
   saveBtn.disabled = disabled;
   runBtn.disabled = disabled;
   copyPromptBtn.disabled = disabled;
@@ -375,6 +399,7 @@ function setEditor(project) {
   promptEl.disabled = false;
   settingsBtn.disabled = running;
   promptsBtn.disabled = running;
+  auditPromptsBtn.disabled = running;
   saveBtn.disabled = running;
   state.dirty = false;
 }
@@ -446,6 +471,7 @@ function startPolling(projectId) {
       promptEl.disabled = false;
       settingsBtn.disabled = running;
       promptsBtn.disabled = running;
+      auditPromptsBtn.disabled = running;
       saveBtn.disabled = running;
 
       // Refresh sidebar status dots.
@@ -477,6 +503,7 @@ async function loadProject(projectId, { resetDirty = true } = {}) {
     promptEl.disabled = false;
     settingsBtn.disabled = running;
     promptsBtn.disabled = running;
+    auditPromptsBtn.disabled = running;
     saveBtn.disabled = running;
   }
 
@@ -649,6 +676,18 @@ async function cloneCurrentProjectForEdits() {
         await api(`/api/projects/${encodeURIComponent(newId)}/system-prompts`, {
           method: "PUT",
           body: JSON.stringify(sp.current),
+        });
+      }
+    } catch {
+      // best-effort
+    }
+
+    try {
+      const auditPromptId = src.audit_prompt_id;
+      if (auditPromptId) {
+        await api(`/api/projects/${encodeURIComponent(newId)}/audit-prompt`, {
+          method: "PUT",
+          body: JSON.stringify({ audit_prompt_id: auditPromptId }),
         });
       }
     } catch {
@@ -873,6 +912,242 @@ async function restorePromptDefaults() {
   }
 }
 
+function auditPromptPreview(text) {
+  const flat = String(text || "")
+    .trim()
+    .replace(/\s+/g, " ");
+  if (!flat) return "—";
+  const max = 84;
+  return flat.length > max ? `${flat.slice(0, max - 1)}…` : flat;
+}
+
+function renderAuditPromptList() {
+  auditPromptListEl.innerHTML = "";
+
+  const prompts = Array.isArray(state.auditPrompts) ? state.auditPrompts : [];
+  if (!prompts.length) {
+    const empty = document.createElement("div");
+    empty.className = "project-meta";
+    empty.style.padding = "10px";
+    empty.textContent = "No audit prompts.";
+    auditPromptListEl.appendChild(empty);
+    return;
+  }
+
+  const selectedId = state.currentProject?.audit_prompt_id;
+
+  for (const p of prompts) {
+    const row = document.createElement("div");
+    row.className = "project-row" + (p.id === state.activeAuditPromptId ? " selected" : "");
+
+    const selectBtn = document.createElement("button");
+    selectBtn.type = "button";
+    selectBtn.className = "project-select";
+    selectBtn.disabled = state.busy;
+
+    const left = document.createElement("div");
+    const name = document.createElement("div");
+    name.className = "project-name";
+    name.textContent = p.name || p.id;
+    const meta1 = document.createElement("div");
+    meta1.className = "project-meta";
+    meta1.textContent = auditPromptPreview(p.prompt);
+    left.appendChild(name);
+    left.appendChild(meta1);
+    selectBtn.appendChild(left);
+
+    const side = document.createElement("div");
+    side.className = "project-side";
+
+    const dot = document.createElement("div");
+    dot.className = p.id === selectedId ? "dot success" : "dot";
+    dot.title = p.id === selectedId ? "Selected for this audit" : "Not selected";
+
+    const delBtn = document.createElement("button");
+    delBtn.type = "button";
+    delBtn.className = "icon-btn danger";
+    delBtn.title = "Delete audit prompt";
+    delBtn.textContent = "×";
+    delBtn.disabled = state.busy;
+
+    side.appendChild(dot);
+    side.appendChild(delBtn);
+    row.appendChild(selectBtn);
+    row.appendChild(side);
+
+    selectBtn.addEventListener("click", () => selectAuditPrompt(p.id));
+    delBtn.addEventListener("click", async (ev) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      await deleteAuditPrompt(p);
+    });
+
+    auditPromptListEl.appendChild(row);
+  }
+}
+
+function fillAuditPromptEditor(prompt) {
+  auditPromptNameEl.value = prompt?.name || "";
+  auditPromptTextEl.value = prompt?.prompt || "";
+
+  const activeId = state.activeAuditPromptId;
+  const selectedId = state.currentProject?.audit_prompt_id;
+  const isSelected = Boolean(activeId && selectedId && activeId === selectedId);
+
+  useAuditPromptBtn.textContent = isSelected ? "Selected" : "Use for this audit";
+  useAuditPromptBtn.disabled = state.busy || !activeId || isSelected;
+  saveAuditPromptBtn.disabled = state.busy || !activeId;
+  deleteAuditPromptBtn.disabled = state.busy || !activeId;
+}
+
+function selectAuditPrompt(promptId) {
+  state.activeAuditPromptId = promptId || null;
+  const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+  fillAuditPromptEditor(prompt);
+  renderAuditPromptList();
+  auditPromptNameEl.focus();
+}
+
+async function openAuditPrompts() {
+  if (!state.selectedId || state.busy) return;
+  auditPromptsErrorEl.textContent = "";
+  showOverlay(auditPromptsOverlayEl);
+
+  try {
+    const data = await api("/api/audit-prompts");
+    state.auditPrompts = Array.isArray(data?.prompts) ? data.prompts : [];
+
+    const selectedId = state.currentProject?.audit_prompt_id;
+    const hasSelected = selectedId && state.auditPrompts.some((p) => p.id === selectedId);
+    const firstId = state.auditPrompts[0]?.id;
+    state.activeAuditPromptId = (hasSelected ? selectedId : firstId) || null;
+
+    renderAuditPromptList();
+    const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(prompt);
+  } catch (e) {
+    auditPromptsErrorEl.textContent = String(e.message || e);
+  }
+}
+
+async function createAuditPrompt() {
+  if (state.busy) return;
+  const name = window.prompt("New audit prompt name:", "");
+  if (name === null) return;
+  const trimmed = name.trim();
+  if (!trimmed) {
+    showToast("Name required");
+    return;
+  }
+
+  auditPromptsErrorEl.textContent = "";
+  newAuditPromptBtn.disabled = true;
+  try {
+    const created = await api("/api/audit-prompts", {
+      method: "POST",
+      body: JSON.stringify({ name: trimmed, prompt: "" }),
+    });
+    const data = await api("/api/audit-prompts");
+    state.auditPrompts = Array.isArray(data?.prompts) ? data.prompts : [];
+    state.activeAuditPromptId = created?.id || state.auditPrompts[0]?.id || null;
+    renderAuditPromptList();
+    const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(prompt);
+    showToast("Audit prompt created");
+  } catch (e) {
+    auditPromptsErrorEl.textContent = String(e.message || e);
+  } finally {
+    newAuditPromptBtn.disabled = false;
+  }
+}
+
+async function saveAuditPrompt() {
+  if (state.busy) return;
+  const promptId = state.activeAuditPromptId;
+  if (!promptId) return;
+
+  const name = (auditPromptNameEl.value || "").trim();
+  if (!name) {
+    auditPromptsErrorEl.textContent = "Name required";
+    return;
+  }
+
+  auditPromptsErrorEl.textContent = "";
+  saveAuditPromptBtn.disabled = true;
+  try {
+    await api(`/api/audit-prompts/${encodeURIComponent(promptId)}`, {
+      method: "PUT",
+      body: JSON.stringify({ name, prompt: auditPromptTextEl.value || "" }),
+    });
+    const data = await api("/api/audit-prompts");
+    state.auditPrompts = Array.isArray(data?.prompts) ? data.prompts : [];
+    renderAuditPromptList();
+    const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(prompt);
+    showToast("Saved");
+  } catch (e) {
+    auditPromptsErrorEl.textContent = String(e.message || e);
+  } finally {
+    saveAuditPromptBtn.disabled = false;
+  }
+}
+
+async function deleteAuditPrompt(prompt) {
+  if (state.busy) return;
+  if (!prompt?.id) return;
+  const label = prompt.name || prompt.id;
+  const ok = window.confirm(`Delete audit prompt "${label}"?\n\nThis cannot be undone.`);
+  if (!ok) return;
+
+  auditPromptsErrorEl.textContent = "";
+  try {
+    await api(`/api/audit-prompts/${encodeURIComponent(prompt.id)}`, { method: "DELETE" });
+    const data = await api("/api/audit-prompts");
+    state.auditPrompts = Array.isArray(data?.prompts) ? data.prompts : [];
+
+    if (state.activeAuditPromptId === prompt.id) {
+      const selectedId = state.currentProject?.audit_prompt_id;
+      const hasSelected = selectedId && state.auditPrompts.some((p) => p.id === selectedId);
+      state.activeAuditPromptId = (hasSelected ? selectedId : state.auditPrompts[0]?.id) || null;
+    }
+
+    renderAuditPromptList();
+    const next = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(next);
+    showToast("Deleted");
+  } catch (e) {
+    auditPromptsErrorEl.textContent = String(e.message || e);
+  }
+}
+
+async function useActiveAuditPromptForProject() {
+  if (!state.selectedId || state.busy) return;
+  const promptId = state.activeAuditPromptId;
+  if (!promptId) return;
+
+  auditPromptsErrorEl.textContent = "";
+  useAuditPromptBtn.disabled = true;
+  try {
+    const updated = await api(`/api/projects/${encodeURIComponent(state.selectedId)}/audit-prompt`, {
+      method: "PUT",
+      body: JSON.stringify({ audit_prompt_id: promptId }),
+    });
+    if (state.currentProject) {
+      state.currentProject.audit_prompt_id = updated?.audit_prompt_id || promptId;
+    }
+    renderAuditPromptList();
+    const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(prompt);
+    showToast("Selected");
+    await refreshProjects({ keepSelection: true, silent: true });
+  } catch (e) {
+    auditPromptsErrorEl.textContent = String(e.message || e);
+  } finally {
+    const prompt = (state.auditPrompts || []).find((p) => p.id === state.activeAuditPromptId);
+    fillAuditPromptEditor(prompt);
+  }
+}
+
 async function copyFrom(el) {
   const text = el.value || "";
   if (!text) return;
@@ -891,6 +1166,7 @@ function bindEvents() {
   runBtn.addEventListener("click", () => runProject());
   settingsBtn.addEventListener("click", () => openSettings());
   promptsBtn.addEventListener("click", () => openPrompts());
+  auditPromptsBtn.addEventListener("click", () => openAuditPrompts());
 
   projectNameEl.addEventListener("input", () => (state.dirty = true));
   promptEl.addEventListener("input", () => (state.dirty = true));
@@ -949,6 +1225,15 @@ function bindEvents() {
   closePromptsBtn.addEventListener("click", () => hideOverlay(promptsOverlayEl));
   savePromptsBtn.addEventListener("click", () => savePrompts());
   restorePromptDefaultsBtn.addEventListener("click", () => restorePromptDefaults());
+
+  closeAuditPromptsBtn.addEventListener("click", () => hideOverlay(auditPromptsOverlayEl));
+  newAuditPromptBtn.addEventListener("click", () => createAuditPrompt());
+  saveAuditPromptBtn.addEventListener("click", () => saveAuditPrompt());
+  deleteAuditPromptBtn.addEventListener("click", async () => {
+    const p = (state.auditPrompts || []).find((x) => x.id === state.activeAuditPromptId);
+    await deleteAuditPrompt(p);
+  });
+  useAuditPromptBtn.addEventListener("click", () => useActiveAuditPromptForProject());
 
   const doUnlock = async () => {
     unlockErrorEl.textContent = "";

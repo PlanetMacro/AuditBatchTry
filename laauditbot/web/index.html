@@ -38,7 +38,8 @@
           </div>
           <div class="panel-actions">
             <button class="btn" id="settingsBtn">Settings</button>
-            <button class="btn" id="promptsBtn">Prompts</button>
+            <button class="btn small" id="promptsBtn">System Prompts</button>
+            <button class="btn small" id="auditPromptsBtn">Audit Prompts</button>
             <button class="btn" id="saveBtn">Save</button>
             <button class="btn primary" id="runBtn">Run</button>
           </div>
@@ -47,7 +48,7 @@
         <div class="split">
           <section class="pane">
             <div class="pane-header">
-              <div class="pane-title">Prompt</div>
+              <div class="pane-title">Code</div>
               <div class="pane-actions">
                 <button class="btn small" id="copyPromptBtn">Copy</button>
               </div>
@@ -56,7 +57,7 @@
               id="promptText"
               class="textarea"
               spellcheck="false"
-              placeholder="Paste your audit prompt here…"
+              placeholder="Paste code to audit here…"
             ></textarea>
           </section>
 
@@ -288,6 +289,58 @@
             <button class="btn primary" id="savePromptsBtn">Save Prompts</button>
           </div>
           <div id="promptsError" class="modal-error" role="alert"></div>
+        </div>
+      </div>
+    </div>
+
+    <div id="auditPromptsOverlay" class="overlay" aria-label="Audit Prompts" aria-hidden="true">
+      <div class="modal panel">
+        <div class="panel-header">
+          <div>
+            <div class="title">Audit Prompts</div>
+            <div class="hint">Pick a template and apply it to the next run</div>
+          </div>
+          <div class="panel-actions">
+            <button class="btn" id="closeAuditPromptsBtn">Close</button>
+          </div>
+        </div>
+        <div class="modal-body">
+          <div class="audit-prompts-split">
+            <section class="pane">
+              <div class="pane-header">
+                <div class="pane-title">Audit Prompts</div>
+                <div class="pane-actions">
+                  <button class="btn small primary" id="newAuditPromptBtn">New</button>
+                </div>
+              </div>
+              <div id="auditPromptList" class="project-list audit-prompt-list" aria-label="Audit prompt list"></div>
+            </section>
+
+            <section class="pane">
+              <div class="pane-header">
+                <div class="pane-title">Edit</div>
+                <div class="pane-actions">
+                  <button class="btn small" id="useAuditPromptBtn">Use for this audit</button>
+                </div>
+              </div>
+              <div class="audit-prompt-editor">
+                <label class="field">
+                  <div class="field-label">Name</div>
+                  <input id="auditPromptName" class="input" type="text" autocomplete="off" />
+                </label>
+                <label class="field audit-prompt-text-field">
+                  <div class="field-label">Prompt</div>
+                  <textarea id="auditPromptText" class="textarea" spellcheck="false"></textarea>
+                </label>
+
+                <div class="modal-actions">
+                  <button class="btn danger" id="deleteAuditPromptBtn">Delete</button>
+                  <button class="btn primary" id="saveAuditPromptBtn">Save</button>
+                </div>
+                <div id="auditPromptsError" class="modal-error" role="alert"></div>
+              </div>
+            </section>
+          </div>
         </div>
       </div>
     </div>

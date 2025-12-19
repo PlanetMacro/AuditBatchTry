@@ -43,6 +43,7 @@ RESULT_FILENAME = "result.txt"
 LOG_FILENAME = "logs.txt"
 CONFIG_FILENAME = "config.json"
 SYSTEM_PROMPTS_FILENAME = "system_prompts.json"
+AUDIT_PROMPTS_FILENAME = "audit_prompts.json"
 RUNS_SUBDIR = "runs"
 
 PROJECT_ID_RE = re.compile(r"^[a-f0-9]{32}$")
@@ -52,6 +53,15 @@ PROJECT_LOCKS: dict[str, threading.Lock] = {}
 RUN_THREADS: dict[str, threading.Thread] = {}
 API_TOKENS: set[str] = set()
 API_KEY_CACHE: Optional[str] = None
+
+AUDIT_PROMPTS_FILE = DATA_DIR / AUDIT_PROMPTS_FILENAME
+AUDIT_PROMPTS_LOCK = threading.Lock()
+
+DEFAULT_AUDIT_PROMPT_ID = "circuit_audit"
+DEFAULT_AUDIT_PROMPT_NAME = "circuit audit"
+DEFAULT_AUDIT_PROMPT_TEXT = (
+    "Audit the following codebase for missing constraints and general security issues"
+)
 
 
 def _now_iso() -> str:
@@ -251,6 +261,15 @@ def _is_project_locked(meta: dict[str, Any]) -> bool:
 def _list_projects() -> list[dict[str, Any]]:
     if not PROJECTS_DIR.exists():
         return []
+    prompt_name_by_id: dict[str, str] = {}
+    for p in _load_or_init_audit_prompts():
+        if not isinstance(p, dict):
+            continue
+        pid = str(p.get("id") or "").strip()
+        if not pid:
+            continue
+        prompt_name_by_id[pid] = str(p.get("name") or "").strip() or pid
+
     projects: list[dict[str, Any]] = []
     for child in PROJECTS_DIR.iterdir():
         if not child.is_dir():
@@ -277,6 +296,15 @@ def _list_projects() -> list[dict[str, Any]]:
             used_cfg.get("format_max_parallel_issues") or cfg["format_max_parallel_issues"]
         )
         meta["models"] = models
+        meta["audit_prompt_id"] = _normalize_project_audit_prompt_id(meta.get("audit_prompt_id"))
+        used_audit_id = _normalize_project_audit_prompt_id(
+            used_cfg.get("audit_prompt_id") or meta.get("audit_prompt_id")
+        )
+        used_audit_name = str(used_cfg.get("audit_prompt_name") or "").strip() or prompt_name_by_id.get(
+            used_audit_id, ""
+        )
+        meta["audit_prompt_used_id"] = used_audit_id
+        meta["audit_prompt_used_name"] = used_audit_name
         meta["locked"] = _is_project_locked(meta)
         projects.append(meta)
     projects.sort(key=lambda m: (m.get("updated_at") or "", m.get("created_at") or ""), reverse=True)
@@ -299,6 +327,7 @@ def _create_project(*, name: Optional[str], prompt: Optional[str]) -> dict[str, 
         "last_run_started_at": None,
         "last_run_finished_at": None,
         "last_run_config": None,
+        "audit_prompt_id": _fallback_audit_prompt_id(),
         "error": None,
     }
 
@@ -382,6 +411,20 @@ class SystemPromptsUpdate(BaseModel):
     generation: Optional[str] = None
     merge: Optional[str] = None
     format: Optional[str] = None
+
+
+class AuditPromptCreate(BaseModel):
+    name: str
+    prompt: Optional[str] = None
+
+
+class AuditPromptUpdate(BaseModel):
+    name: Optional[str] = None
+    prompt: Optional[str] = None
+
+
+class ProjectAuditPromptUpdate(BaseModel):
+    audit_prompt_id: Optional[str] = None
 
 
 @dataclass(frozen=True)
@@ -480,6 +523,98 @@ def _normalize_system_prompts(data: dict[str, Any], defaults: dict[str, str]) ->
     return out  # type: ignore[return-value]
 
 
+def _default_audit_prompt() -> dict[str, str]:
+    return {
+        "id": DEFAULT_AUDIT_PROMPT_ID,
+        "name": DEFAULT_AUDIT_PROMPT_NAME,
+        "prompt": DEFAULT_AUDIT_PROMPT_TEXT,
+    }
+
+
+def _normalize_audit_prompts_record(data: dict[str, Any]) -> dict[str, Any]:
+    prompts_in = data.get("prompts")
+    if not isinstance(prompts_in, list):
+        prompts_in = []
+
+    normalized: list[dict[str, str]] = []
+    seen: set[str] = set()
+    for item in prompts_in:
+        if not isinstance(item, dict):
+            continue
+        pid = str(item.get("id") or "").strip()
+        if not pid:
+            pid = uuid.uuid4().hex
+        if pid in seen:
+            continue
+        seen.add(pid)
+
+        name = str(item.get("name") or "").strip() or f"Prompt {pid[:6]}"
+        prompt = str(item.get("prompt") or "").rstrip()
+        normalized.append({"id": pid, "name": name, "prompt": prompt})
+
+    if not normalized:
+        normalized = [_default_audit_prompt()]
+
+    return {"version": 1, "prompts": normalized}
+
+
+def _load_or_init_audit_prompts_record() -> dict[str, Any]:
+    with AUDIT_PROMPTS_LOCK:
+        record = _normalize_audit_prompts_record(_load_json(AUDIT_PROMPTS_FILE))
+        _atomic_write_json(AUDIT_PROMPTS_FILE, record)
+        return record
+
+
+def _load_or_init_audit_prompts() -> list[dict[str, str]]:
+    record = _load_or_init_audit_prompts_record()
+    prompts = record.get("prompts")
+    if isinstance(prompts, list):
+        return prompts  # type: ignore[return-value]
+    return [_default_audit_prompt()]
+
+
+def _audit_prompt_exists(prompt_id: str) -> bool:
+    if not prompt_id:
+        return False
+    for p in _load_or_init_audit_prompts():
+        if p.get("id") == prompt_id:
+            return True
+    return False
+
+
+def _fallback_audit_prompt_id() -> str:
+    prompts = _load_or_init_audit_prompts()
+    for p in prompts:
+        if p.get("id") == DEFAULT_AUDIT_PROMPT_ID:
+            return DEFAULT_AUDIT_PROMPT_ID
+    return str(prompts[0].get("id") or DEFAULT_AUDIT_PROMPT_ID)
+
+
+def _normalize_project_audit_prompt_id(value: Any) -> str:
+    raw = str(value or "").strip()
+    if raw and _audit_prompt_exists(raw):
+        return raw
+    return _fallback_audit_prompt_id()
+
+
+def _audit_prompt_text_for_id(prompt_id: Any) -> tuple[str, str]:
+    resolved_id = _normalize_project_audit_prompt_id(prompt_id)
+    for p in _load_or_init_audit_prompts():
+        if p.get("id") == resolved_id:
+            return (str(p.get("prompt") or "").rstrip(), resolved_id)
+    return ("", resolved_id)
+
+
+def _audit_prompt_info_for_id(prompt_id: Any) -> tuple[str, str, str]:
+    resolved_id = _normalize_project_audit_prompt_id(prompt_id)
+    for p in _load_or_init_audit_prompts():
+        if p.get("id") == resolved_id:
+            text = str(p.get("prompt") or "").rstrip()
+            name = str(p.get("name") or "").strip() or resolved_id
+            return (text, resolved_id, name)
+    return ("", resolved_id, resolved_id)
+
+
 def _load_default_system_prompts() -> dict[str, str]:
     return _load_default_system_prompts_from_files()
 
@@ -513,11 +648,15 @@ def _run_project_audit(project_id: str) -> None:
 
     run_cfg: Optional[RunConfig] = None
     sys_prompts: dict[str, str] = {}
+    audit_prompt_id = ""
+    audit_prompt_text = ""
+    audit_prompt_name = ""
     with lock:
         meta = _load_project_meta(project_id)
         cfg = _load_or_init_project_config(project_id)
         run_cfg = _config_to_run_config(cfg)
         sys_prompts = _load_or_init_project_system_prompts(project_id)
+        audit_prompt_text, audit_prompt_id, audit_prompt_name = _audit_prompt_info_for_id(meta.get("audit_prompt_id"))
         meta["status"] = "running"
         meta["phase"] = "starting"
         meta["error"] = None
@@ -527,7 +666,10 @@ def _run_project_audit(project_id: str) -> None:
             **cfg,
             "parallel_runs": run_cfg.n,
             "format_max_parallel_issues": run_cfg.format_max_parallel_issues,
+            "audit_prompt_id": audit_prompt_id,
+            "audit_prompt_name": audit_prompt_name,
         }
+        meta["audit_prompt_id"] = audit_prompt_id
         _save_project_meta(project_id, meta)
 
     log_path = paths["logs"]
@@ -541,9 +683,13 @@ def _run_project_audit(project_id: str) -> None:
             with redirect_stdout(logger), redirect_stderr(logger):
                 print(f"[run] Starting audit for project={project_id} at {_now_iso()}")
 
-                prompt = _read_text(paths["prompt"]).strip()
-                if not prompt:
-                    raise RuntimeError("Prompt is empty. Fill it in the UI and retry.")
+                user_prompt = _read_text(paths["prompt"]).strip()
+                if not user_prompt:
+                    raise RuntimeError("Code is empty. Paste code in the UI and retry.")
+
+                prompt_prefix = (audit_prompt_text or "").strip()
+                prompt = f"{prompt_prefix}\n\n{user_prompt}" if prompt_prefix else user_prompt
+                print(f"[run] AUDIT_PROMPT_ID={audit_prompt_id or '-'}")
 
                 api_key = _get_api_key_or_raise()
                 print("[run] API key unlocked.")
@@ -617,6 +763,7 @@ def _run_project_audit(project_id: str) -> None:
                 formatted = oc.format_issues_incremental(
                     api_key=api_key,
                     merged_text=merged.text or "",
+                    original_code=user_prompt,
                     model=config.format_model,
                     final_output_path=str(paths["result"]),
                     reasoning_effort=config.format_reasoning_effort,
@@ -692,6 +839,7 @@ def _startup() -> None:
     DATA_DIR.mkdir(parents=True, exist_ok=True)
     _maybe_migrate_legacy_projects_dir()
     PROJECTS_DIR.mkdir(parents=True, exist_ok=True)
+    _load_or_init_audit_prompts_record()
     _ensure_seed_project()
     _try_bootstrap_api_key_from_env()
 
@@ -802,8 +950,20 @@ def api_get_project(project_id: str) -> dict[str, Any]:
         "merge": used_cfg.get("merge_model") or cfg["merge_model"],
         "format": used_cfg.get("format_model") or cfg["format_model"],
     }
+    used_audit_name = str(used_cfg.get("audit_prompt_name") or "").strip()
+    if used_audit_name:
+        used_audit_id = _normalize_project_audit_prompt_id(
+            used_cfg.get("audit_prompt_id") or meta.get("audit_prompt_id")
+        )
+    else:
+        _, used_audit_id, used_audit_name = _audit_prompt_info_for_id(
+            used_cfg.get("audit_prompt_id") or meta.get("audit_prompt_id")
+        )
     return {
         **meta,
+        "audit_prompt_id": _normalize_project_audit_prompt_id(meta.get("audit_prompt_id")),
+        "audit_prompt_used_id": used_audit_id,
+        "audit_prompt_used_name": used_audit_name,
         "locked": _is_project_locked(meta),
         "parallel_runs": int(used_cfg.get("parallel_runs") or (1 << int(cfg["log_number_of_batches"]))),
         "format_parallel_issues": int(
@@ -920,6 +1080,122 @@ def api_restore_project_system_prompts(project_id: str) -> dict[str, Any]:
         _save_project_meta(project_id, meta)
 
     return {"current": defaults, "defaults": defaults}
+
+
+@app.get("/api/audit-prompts")
+def api_list_audit_prompts() -> dict[str, Any]:
+    record = _load_or_init_audit_prompts_record()
+    prompts = record.get("prompts") if isinstance(record, dict) else None
+    return {"prompts": prompts or [], "default_id": DEFAULT_AUDIT_PROMPT_ID}
+
+
+@app.post("/api/audit-prompts")
+def api_create_audit_prompt(body: AuditPromptCreate) -> dict[str, Any]:
+    name = str(body.name or "").strip()
+    if not name:
+        raise HTTPException(status_code=400, detail="Name required")
+    prompt_text = str(body.prompt or "").rstrip()
+
+    with AUDIT_PROMPTS_LOCK:
+        record = _normalize_audit_prompts_record(_load_json(AUDIT_PROMPTS_FILE))
+        prompts = record.get("prompts")
+        if not isinstance(prompts, list):
+            prompts = []
+
+        prompt_id = uuid.uuid4().hex
+        created = {"id": prompt_id, "name": name, "prompt": prompt_text}
+        prompts.append(created)
+        record["prompts"] = prompts
+        _atomic_write_json(AUDIT_PROMPTS_FILE, record)
+        return created
+
+
+@app.put("/api/audit-prompts/{prompt_id}")
+def api_update_audit_prompt(prompt_id: str, body: AuditPromptUpdate) -> dict[str, Any]:
+    prompt_id = str(prompt_id or "").strip()
+    if not prompt_id:
+        raise HTTPException(status_code=404, detail="Audit prompt not found")
+
+    with AUDIT_PROMPTS_LOCK:
+        record = _normalize_audit_prompts_record(_load_json(AUDIT_PROMPTS_FILE))
+        prompts = record.get("prompts")
+        if not isinstance(prompts, list):
+            prompts = []
+
+        updated: Optional[dict[str, Any]] = None
+        for p in prompts:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("id") or "") != prompt_id:
+                continue
+            if body.name is not None:
+                name = str(body.name or "").strip()
+                if not name:
+                    raise HTTPException(status_code=400, detail="Name required")
+                p["name"] = name
+            if body.prompt is not None:
+                p["prompt"] = str(body.prompt or "").rstrip()
+            updated = p
+            break
+
+        if updated is None:
+            raise HTTPException(status_code=404, detail="Audit prompt not found")
+
+        record["prompts"] = prompts
+        _atomic_write_json(AUDIT_PROMPTS_FILE, record)
+        return updated
+
+
+@app.delete("/api/audit-prompts/{prompt_id}")
+def api_delete_audit_prompt(prompt_id: str) -> dict[str, Any]:
+    prompt_id = str(prompt_id or "").strip()
+    if not prompt_id:
+        raise HTTPException(status_code=404, detail="Audit prompt not found")
+
+    with AUDIT_PROMPTS_LOCK:
+        record = _normalize_audit_prompts_record(_load_json(AUDIT_PROMPTS_FILE))
+        prompts = record.get("prompts")
+        if not isinstance(prompts, list):
+            prompts = []
+
+        if len(prompts) <= 1:
+            raise HTTPException(status_code=409, detail="Cannot delete the last audit prompt")
+
+        kept: list[dict[str, Any]] = []
+        deleted = False
+        for p in prompts:
+            if not isinstance(p, dict):
+                continue
+            if str(p.get("id") or "") == prompt_id:
+                deleted = True
+                continue
+            kept.append(p)
+
+        if not deleted:
+            raise HTTPException(status_code=404, detail="Audit prompt not found")
+
+        record["prompts"] = kept
+        _atomic_write_json(AUDIT_PROMPTS_FILE, record)
+
+    return {"deleted": True}
+
+
+@app.put("/api/projects/{project_id}/audit-prompt")
+def api_update_project_audit_prompt(project_id: str, body: ProjectAuditPromptUpdate) -> dict[str, Any]:
+    lock = _get_project_lock(project_id)
+
+    with lock:
+        meta = _load_project_meta(project_id)
+        if meta.get("status") == "running":
+            raise HTTPException(status_code=409, detail="Project is running")
+
+        requested = str(body.audit_prompt_id or "").strip()
+        if requested and not _audit_prompt_exists(requested):
+            raise HTTPException(status_code=404, detail="Audit prompt not found")
+        meta["audit_prompt_id"] = requested or _fallback_audit_prompt_id()
+        _save_project_meta(project_id, meta)
+
+    return api_get_project(project_id)
 
 
 @app.delete("/api/projects/{project_id}")

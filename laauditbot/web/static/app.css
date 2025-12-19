@@ -269,11 +269,23 @@ body {
 }
 
 .dot.running {
-  background: var(--accent0);
+  background: var(--success0);
 }
 
 .dot.success {
   background: var(--success0);
+}
+
+.done-check {
+  width: 16px;
+  height: 16px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  font-size: 14px;
+  line-height: 1;
+  color: var(--success0);
+  user-select: none;
 }
 
 .dot.error {
@@ -305,6 +317,11 @@ body {
 
 .name-input {
   width: min(620px, 100%);
+  border-color: transparent;
+}
+
+.name-input:focus {
+  border-color: transparent;
 }
 
 .pill {
@@ -352,6 +369,50 @@ body {
   gap: 14px;
   min-height: 0;
   flex: 1;
+}
+
+.audit-prompts-split {
+  display: grid;
+  grid-template-columns: 340px 1fr;
+  gap: 14px;
+  min-height: 0;
+  flex: 1;
+}
+
+.audit-prompt-list {
+  flex: 1;
+  min-height: 0;
+}
+
+.audit-prompt-editor {
+  padding: 12px;
+  overflow: auto;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+  min-height: 0;
+  flex: 1;
+}
+
+.audit-prompt-text-field {
+  flex: 1;
+  min-height: 0;
+}
+
+.audit-prompt-text-field .textarea {
+  background: rgba(9, 14, 30, 0.25);
+  border: 1px solid var(--border0);
+  border-radius: 12px;
+}
+
+.btn.danger {
+  border-color: rgba(255, 107, 107, 0.6);
+  background: rgba(255, 107, 107, 0.1);
+}
+
+.btn.danger:hover {
+  border-color: rgba(255, 107, 107, 0.85);
+  background: rgba(255, 107, 107, 0.16);
 }
 
 .pane {
@@ -555,6 +616,9 @@ body {
     grid-row: 3;
   }
   .split {
+    grid-template-columns: 1fr;
+  }
+  .audit-prompts-split {
     grid-template-columns: 1fr;
   }
 }

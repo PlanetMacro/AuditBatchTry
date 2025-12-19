@@ -24,47 +24,52 @@ from .utils import (
 )
 
 
-def _split_merged_issue_blocks(merged_text: str) -> List[Tuple[int, str]]:
+def _split_merged_lead_blocks(merged_text: str) -> List[Tuple[int, str]]:
     if not merged_text or not merged_text.strip():
         return []
 
-    blocks = re.split(r"\n\s*\n(?=Issue:\s*\d+)", merged_text.strip())
-    issues: List[Tuple[int, str]] = []
+    blocks = re.split(r"\n\s*\n(?=Lead:\s*\d+)", merged_text.strip())
+    leads: List[Tuple[int, str]] = []
 
     for b in blocks:
         block = b.strip()
         if not block:
             continue
-        m = re.match(r"Issue:\s*(\d+)", block)
+        m = re.match(r"Lead:\s*(\d+)", block)
         if not m:
             continue
         try:
             num = int(m.group(1))
         except ValueError:
             continue
-        issues.append((num, block))
+        leads.append((num, block))
 
-    issues.sort(key=lambda t: t[0])
-    return issues
+    leads.sort(key=lambda t: t[0])
+    return leads
 
 
-def _formatted_issue_path(issue_number: int, runs_dir: str = RUNS_DIR) -> str:
+def _formatted_lead_path(lead_number: int, runs_dir: str = RUNS_DIR) -> str:
     _ensure_runs_dir(runs_dir)
-    return os.path.join(runs_dir, f"formatted_issue_{issue_number}.txt")
+    return os.path.join(runs_dir, f"formatted_lead_{lead_number}.txt")
 
 
-def _renumber_issue_block(text: str, new_number: int) -> str:
+def _dropped_lead_path(lead_number: int, runs_dir: str = RUNS_DIR) -> str:
+    _ensure_runs_dir(runs_dir)
+    return os.path.join(runs_dir, f"dropped_lead_{lead_number}.txt")
+
+
+def _renumber_lead_block(text: str, new_number: int) -> str:
     lines = text.splitlines()
     if not lines:
         return ""
     first = lines[0]
-    new_first = re.sub(r"^Issue\s+\d+\s*:", f"Issue {new_number}:", first)
+    new_first = re.sub(r"^Lead\s+\d+\s*:", f"Lead {new_number}:", first)
     lines[0] = new_first
     return "\n".join(lines)
 
 
-def _rebuild_final_report_from_issue_files(
-    issues: List[Tuple[int, str]],
+def _rebuild_final_report_from_lead_files(
+    leads: List[Tuple[int, str]],
     runs_dir: str,
     final_output_path: str,
 ) -> None:
@@ -73,8 +78,8 @@ def _rebuild_final_report_from_issue_files(
     next_number = 1
 
     with open(tmp, "w", encoding="utf-8") as out:
-        for issue_number, _ in sorted(issues, key=lambda t: t[0]):
-            path = _formatted_issue_path(issue_number, runs_dir)
+        for lead_number, _ in sorted(leads, key=lambda t: t[0]):
+            path = _formatted_lead_path(lead_number, runs_dir)
             if not os.path.exists(path):
                 continue
 
@@ -84,7 +89,7 @@ def _rebuild_final_report_from_issue_files(
             if not txt:
                 continue
 
-            renumbered = _renumber_issue_block(txt, next_number).strip()
+            renumbered = _renumber_lead_block(txt, next_number).strip()
             if not renumbered:
                 continue
 
@@ -104,6 +109,7 @@ def format_issues_incremental(
     *,
     api_key: str,
     merged_text: str,
+    original_code: str = "",
     model: str,
     final_output_path: str,
     reasoning_effort: str = "high",
@@ -121,10 +127,12 @@ def format_issues_incremental(
                 full_text = f.read()
         return CompletionResult(text=full_text, reasoning_tokens=0, output_tokens=0, total_tokens=0)
 
-    issues = _split_merged_issue_blocks(merged_text)
-    if not issues:
-        print("[format] No issues could be parsed from merged text.")
+    leads = _split_merged_lead_blocks(merged_text)
+    if not leads:
+        print("[format] No leads could be parsed from merged text.")
         return CompletionResult(text="", reasoning_tokens=0, output_tokens=0, total_tokens=0)
+
+    leads_by_number = {n: block for (n, block) in leads}
 
     headers = _make_headers(api_key)
 
@@ -132,20 +140,44 @@ def format_issues_incremental(
     agg_ot = 0
     agg_tt = 0
 
-    print(f"[format] Incremental formatting of {len(issues)} issues.")
+    print(f"[format] Incremental formatting of {len(leads)} leads.")
 
-    pending_issues: List[Tuple[int, str]] = []
-    for issue_number, block in issues:
-        path = _formatted_issue_path(issue_number, runs_dir)
-        if os.path.exists(path):
-            print(f"[format] Issue {issue_number} already formatted; skipping.")
+    pending_leads: List[Tuple[int, str]] = []
+    for lead_number, block in leads:
+        formatted_path = _formatted_lead_path(lead_number, runs_dir)
+        dropped_path = _dropped_lead_path(lead_number, runs_dir)
+
+        if os.path.exists(dropped_path):
+            print(f"[format] Lead {lead_number} already dropped; skipping.")
             continue
-        pending_issues.append((issue_number, block))
 
-    total_to_format = len(pending_issues)
+        if os.path.exists(formatted_path):
+            if os.path.getsize(formatted_path) > 0:
+                print(f"[format] Lead {lead_number} already formatted; skipping.")
+                continue
+
+            # Backwards-compat: previously we stored dropped leads as empty formatted files.
+            # Migrate them to a dropped marker so the final report and directory contents are clearer.
+            try:
+                tmp = dropped_path + ".tmp"
+                with open(tmp, "w", encoding="utf-8") as f:
+                    f.write("DROPPED (empty formatted output)\n\n")
+                    f.write("Lead:\n")
+                    f.write(block.strip() + "\n")
+                    f.flush()
+                    os.fsync(f.fileno())
+                os.replace(tmp, dropped_path)
+                os.remove(formatted_path)
+            except Exception:
+                pass
+            print(f"[format] Lead {lead_number} already dropped; skipping.")
+            continue
+        pending_leads.append((lead_number, block))
+
+    total_to_format = len(pending_leads)
     if total_to_format == 0:
-        print("[format] All issues already formatted; rebuilding final report.")
-        _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
+        print("[format] All leads already formatted; rebuilding final report.")
+        _rebuild_final_report_from_lead_files(leads, runs_dir, final_output_path)
         if os.path.exists(final_output_path):
             with open(final_output_path, "r", encoding="utf-8") as f:
                 full_text = f.read()
@@ -153,8 +185,10 @@ def format_issues_incremental(
             full_text = ""
         return CompletionResult(text=full_text, reasoning_tokens=0, output_tokens=0, total_tokens=0)
 
-    print(f"[format] {total_to_format} issues require formatting in this run.")
-    formatted_now = 0
+    print(f"[format] {total_to_format} leads require formatting in this run.")
+    processed_now = 0
+    kept_now = 0
+    dropped_now = 0
 
     app_retries = 4
     base_backoff_s = 1.0
@@ -163,30 +197,26 @@ def format_issues_incremental(
     transient_statuses = {"queued", "in_progress"}
 
     idx = 0
-    while idx < len(pending_issues):
-        chunk = pending_issues[idx : idx + max_parallel_issues]
+    while idx < len(pending_leads):
+        chunk = pending_leads[idx : idx + max_parallel_issues]
         idx += max_parallel_issues
 
         print(
-            f"[format] Starting formatting chunk of {len(chunk)} issues "
-            f"(formatted so far: {formatted_now}/{total_to_format})."
+            f"[format] Starting formatting chunk of {len(chunk)} leads "
+            f"(processed so far: {processed_now}/{total_to_format})."
         )
 
-        jobs: Dict[str, int] = {}  # resp_id -> issue_number
+        jobs: Dict[str, int] = {}  # resp_id -> lead_number
         poll_fail_counts: Dict[str, int] = {}
 
-        for issue_number, block in chunk:
-            comment = _random_string(5, 50)
+        code = (original_code or "").rstrip()
+        for lead_number, block in chunk:
             prompt = (
                 f"{issue_format_system_prompt}\n\n"
-                f"' IGNORE THIS COMMENT: {comment}\n\n"
-                "Merged issue list:\n"
-                f"{block.strip()}\n\n"
-                "You are given exactly one issue above.\n"
-                "Return ONLY its reformatted version in the exact output format described above.\n"
-                "If the issue is not an attackable security vulnerability, return an empty response.\n"
-                "Since there is only a single issue in this request, use 'Issue 1:' as the heading; "
-                "the final numbering will be adjusted later."
+                f"Lead to be formalized: {block.strip()}\n"
+                "-----\n"
+                "The original code where the lead was found:\n\n"
+                f"{code}"
             )
 
             payload: Dict[str, Any] = {
@@ -211,20 +241,20 @@ def format_issues_incremental(
             while True:
                 try:
                     resp_id = _start_response_job(headers, payload)
-                    print(f"[format] started formatting issue {issue_number} -> response_id={resp_id}")
-                    jobs[resp_id] = issue_number
+                    print(f"[format] started formatting lead {lead_number} -> response_id={resp_id}")
+                    jobs[resp_id] = lead_number
                     break
                 except OpenAIResponseError as e:
                     attempt += 1
                     if attempt > app_retries:
                         print(
-                            f"[format] giving up starting formatting for issue {issue_number} "
+                            f"[format] giving up starting formatting for lead {lead_number} "
                             f"after {app_retries} retries: {e}. Will retry on next run."
                         )
                         break
                     delay = base_backoff_s * (2 ** (attempt - 1)) + random.uniform(0.0, 0.5)
                     print(
-                        f"[format] start error for issue {issue_number}, "
+                        f"[format] start error for lead {lead_number}, "
                         f"retry {attempt}/{app_retries} after {delay:.2f}s: {e}"
                     )
                     time.sleep(delay)
@@ -238,7 +268,7 @@ def format_issues_incremental(
 
         while pending_resp_ids:
             for resp_id in list(pending_resp_ids):
-                issue_number = jobs[resp_id]
+                lead_number = jobs[resp_id]
 
                 try:
                     data = _safe_request("GET", f"{API_URL}/{resp_id}", headers=headers)
@@ -267,28 +297,56 @@ def format_issues_incremental(
                 if status in transient_statuses:
                     continue
 
-                path = _formatted_issue_path(issue_number, runs_dir)
+                path = _formatted_lead_path(lead_number, runs_dir)
 
                 if status == "completed":
-                    text = _extract_output_text(data) or ""
+                    text = (_extract_output_text(data) or "").strip()
                     rt, ot, tt = _extract_usage(data)
                     agg_rt += rt
                     agg_ot += ot
                     agg_tt += tt
 
-                    tmp = path + ".tmp"
-                    with open(tmp, "w", encoding="utf-8") as f:
-                        f.write(text.strip())
-                        f.flush()
-                        os.fsync(f.fileno())
-                    os.replace(tmp, path)
-                    print(f"[format] Issue {issue_number} formatted and stored at '{path}'.")
+                    dropped_path = _dropped_lead_path(lead_number, runs_dir)
 
-                    _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
+                    if text:
+                        tmp = path + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write(text)
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, path)
+                        try:
+                            if os.path.exists(dropped_path):
+                                os.remove(dropped_path)
+                        except Exception:
+                            pass
+                        print(f"[format] Lead {lead_number} formatted and stored at '{path}'.")
+                        kept_now += 1
+                    else:
+                        tmp = dropped_path + ".tmp"
+                        with open(tmp, "w", encoding="utf-8") as f:
+                            f.write("DROPPED (formatter returned empty output)\n\n")
+                            f.write("Lead:\n")
+                            f.write(leads_by_number.get(lead_number, "").strip() + "\n")
+                            f.flush()
+                            os.fsync(f.fileno())
+                        os.replace(tmp, dropped_path)
+                        try:
+                            if os.path.exists(path):
+                                os.remove(path)
+                        except Exception:
+                            pass
+                        print(f"[format] Lead {lead_number} dropped; marker stored at '{dropped_path}'.")
+                        dropped_now += 1
+
+                    _rebuild_final_report_from_lead_files(leads, runs_dir, final_output_path)
                     print(f"[format] Final report updated at '{final_output_path}'.")
 
-                    formatted_now += 1
-                    print(f"[format] Progress: formatted {formatted_now}/{total_to_format} issues in this run.")
+                    processed_now += 1
+                    print(
+                        f"[format] Progress: processed {processed_now}/{total_to_format} leads "
+                        f"(kept={kept_now} dropped={dropped_now})."
+                    )
 
                     pending_resp_ids.remove(resp_id)
                     continue
@@ -296,14 +354,14 @@ def format_issues_incremental(
                 if status in terminal_statuses:
                     msg = _extract_error_message(data)
                     print(
-                        f"[format] Formatting issue {issue_number} ended with status={status}: {msg}. "
+                        f"[format] Formatting lead {lead_number} ended with status={status}: {msg}. "
                         "Will retry on next run."
                     )
                     pending_resp_ids.remove(resp_id)
                     continue
 
                 print(
-                    f"[format] Formatting issue {issue_number} returned unknown terminal status={status!r}. "
+                    f"[format] Formatting lead {lead_number} returned unknown terminal status={status!r}. "
                     "Will retry on next run."
                 )
                 pending_resp_ids.remove(resp_id)
@@ -315,14 +373,14 @@ def format_issues_incremental(
         with open(final_output_path, "r", encoding="utf-8") as f:
             full_text = f.read()
     else:
-        _rebuild_final_report_from_issue_files(issues, runs_dir, final_output_path)
+        _rebuild_final_report_from_lead_files(leads, runs_dir, final_output_path)
         if os.path.exists(final_output_path):
             with open(final_output_path, "r", encoding="utf-8") as f:
                 full_text = f.read()
         else:
             full_text = ""
 
-    print("[format] Incremental issue formatting completed.")
+    print("[format] Incremental lead formatting completed.")
     return CompletionResult(text=full_text, reasoning_tokens=agg_rt, output_tokens=agg_ot, total_tokens=agg_tt)
 
 
@@ -330,6 +388,7 @@ def format_issues(
     *,
     api_key: str,
     merged_text: str,
+    original_code: str = "",
     model: str,
     reasoning_effort: str = "high",
     verbosity: str = "high",
@@ -337,11 +396,11 @@ def format_issues(
     poll_interval_sec: float = 4.0,
 ) -> CompletionResult:
     """
-    Take a merged flat list of issues (Issue: N / Location: / Description: ...)
+    Take a merged flat list of leads (Lead: N / Location: / Description: ...)
     and turn it into a structured security report.
 
     The model:
-      - Iterates over all issues in merged_text,
+      - Iterates over all leads in merged_text,
       - Drops anything that is not an attackable vulnerability,
       - Rewrites the remaining ones into the detailed security issue template.
 
@@ -354,12 +413,16 @@ def format_issues(
     headers = _make_headers(api_key)
 
     comment = _random_string(5, 50)
+    code = (original_code or "").rstrip()
     prompt = (
         f"{issue_format_system_prompt}\n\n"
         f"' IGNORE THIS COMMENT: {comment}\n\n"
-        "Merged issue list:\n"
+        "Merged lead list:\n"
         f"{merged_text.strip()}\n\n"
-        "Return ONLY the reformatted issues in the exact output format described above."
+        "-----\n"
+        "The original code the lead was generated from:\n"
+        f"{code}\n\n"
+        "Return ONLY the reformatted leads in the exact output format described above."
     )
 
     payload: Dict[str, Any] = {
@@ -382,5 +445,5 @@ def format_issues(
     resp_json = _create_and_poll(headers, payload, poll_interval_sec=poll_interval_sec)
     text = _extract_output_text(resp_json) or "[empty]"
     rt, ot, tt = _extract_usage(resp_json)
-    print("[format] Issue formatting completed.")
+    print("[format] Lead formatting completed.")
     return CompletionResult(text=text, reasoning_tokens=rt, output_tokens=ot, total_tokens=tt)
